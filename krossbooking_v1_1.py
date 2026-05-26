@@ -321,8 +321,8 @@ if not df_cloud.empty:
 
     st.caption(f"📍 **{txt_filtro}** | Mese: **{mes_nombre}** | OTB al: **{fecha_hoy.strftime('%d/%m/%Y')}**")
 
-    tab_kpi, tab_canali, tab_netto, tab_netto_pm, tab_grafici, tab_curve, tab_radar, tab_obiettivi, tab_compset, tab_dati = st.tabs([
-    "📊 KPI & Strategia", "📡 Canali", "💼 Netto PM", "💰 Analisi Costi", "📈 Grafici OTB", "🌊 Booking Curve", "🚨 Radar Rendimento", "🎯 Tracker Obiettivi", "🕵️‍♂️ Comp Set", "☁️ Gestione Dati"
+    tab_kpi, tab_canali, tab_netto, tab_netto_pm, tab_grafici, tab_curve, tab_radar, tab_obiettivi, tab_compset, tab_prezzi, tab_dati = st.tabs([
+    "📊 KPI & Strategia", "📡 Canali", "💼 Netto PM", "💰 Analisi Costi", "📈 Grafici OTB", "🌊 Booking Curve", "🚨 Radar Rendimento", "🎯 Tracker Obiettivi", "🕵️‍♂️ Comp Set", "💡 Prezzi", "☁️ Gestione Dati"
 ])
 
     with tab_kpi:
@@ -856,6 +856,126 @@ Obiettivo: [risultato atteso]
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info(f"Nessuna prenotazione trovata per {prop_name} nell'anno {anno}.")
+
+    with tab_prezzi:
+        st.subheader("💡 Suggerimenti Prezzi — Human-in-the-Loop")
+        st.caption("Genera suggerimenti basati sul Bottom Rate, approva o rifiuta con un clic. In Fase B il prezzo verrà inviato automaticamente al PMS.")
+
+        MARGINI = {"Conservativo": 1.20, "Moderato": 1.35, "Aggressivo": 1.50}
+
+        # --- SEZIONE 1: GENERA SUGGERIMENTO ---
+        st.markdown("### 📝 Genera Nuovo Suggerimento")
+        with st.form("form_suggerimento"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                apt_sug = st.selectbox("Appartamento", tutti_apt)
+            with c2:
+                data_da = st.date_input("Dal", value=date.today())
+                data_a  = st.date_input("Al",  value=date.today() + datetime.timedelta(days=6))
+            with c3:
+                scenario_sug   = st.selectbox("Scenario", list(MARGINI.keys()))
+                prezzo_attuale = st.number_input("Prezzo attuale (€/notte)", min_value=0.0, step=5.0,
+                                                 value=round(float(k['adr']), 0) if k['adr'] > 0 else 80.0)
+
+            margine = MARGINI[scenario_sug]
+            if bottom_rate > 0:
+                prezzo_suggerito = round(max(bottom_rate * margine, prezzo_attuale), 0)
+                br_label = f"Bottom Rate €{bottom_rate:.0f} × {margine:.2f}"
+            else:
+                prezzo_suggerito = round(prezzo_attuale * margine, 0)
+                br_label = "⚠️ Bottom Rate non configurato — moltiplicatore sul prezzo attuale"
+
+            comp_ctx = ""
+            if not df_market.empty:
+                mask_d = (df_market['stay_date'] >= pd.Timestamp(data_da)) & (df_market['stay_date'] <= pd.Timestamp(data_a))
+                comp_avg_sug = df_market[mask_d]['price'].mean() if not df_market[mask_d].empty else None
+                if comp_avg_sug:
+                    comp_ctx = f" | 🕵️ Mercato: €{comp_avg_sug:.0f}/notte"
+
+            st.info(f"💰 **Prezzo suggerito: €{prezzo_suggerito:.0f}/notte** | {br_label}{comp_ctx}")
+            motivo_sug = st.text_area("Note / Motivazione (opzionale)", placeholder="Es: Weekend lungo, alta domanda prevista...")
+            submitted_sug = st.form_submit_button("💾 Salva Suggerimento", use_container_width=True, type="primary")
+
+            if submitted_sug:
+                if data_a <= data_da:
+                    st.error("La data di fine deve essere successiva alla data di inizio.")
+                else:
+                    try:
+                        supabase.table('price_suggestions').insert({
+                            "user_id":              USER_ID,
+                            "property_name":        apt_sug,
+                            "date_from":            str(data_da),
+                            "date_to":              str(data_a),
+                            "current_price":        float(prezzo_attuale),
+                            "suggested_price":      float(prezzo_suggerito),
+                            "scenario":             scenario_sug,
+                            "reason":               motivo_sug or f"Scenario {scenario_sug} — {int((margine-1)*100)}% margine su Bottom Rate",
+                            "bottom_rate_snapshot": float(bottom_rate),
+                            "status":               "pending"
+                        }).execute()
+                        st.success("✅ Suggerimento salvato!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Errore nel salvataggio: {e}")
+
+        st.divider()
+
+        # --- SEZIONE 2: IN ATTESA DI DECISIONE ---
+        st.markdown("### ⏳ In Attesa di Decisione")
+        try:
+            res_pending = supabase.table('price_suggestions').select('*') \
+                .eq('user_id', USER_ID).eq('status', 'pending') \
+                .order('created_at', desc=True).execute()
+        except Exception as e:
+            st.error(f"Errore caricamento suggerimenti: {e}")
+            res_pending = None
+
+        if res_pending and res_pending.data:
+            for sug in res_pending.data:
+                with st.container(border=True):
+                    ca, cb, cc, cd, ce, cf = st.columns([2.5, 2, 1, 1, 1, 1])
+                    ca.markdown(f"**{sug['property_name']}**  \n📅 {sug['date_from']} → {sug['date_to']}")
+                    reason_short = (sug['reason'][:45] + '…') if sug.get('reason') and len(sug['reason']) > 45 else sug.get('reason', '')
+                    cb.markdown(f"*{sug['scenario']}*  \n{reason_short}")
+                    cc.metric("Attuale", f"€{sug['current_price']:.0f}")
+                    delta_pct = f"{((sug['suggested_price']/sug['current_price'])-1)*100:+.0f}%" if sug.get('current_price', 0) > 0 else ""
+                    cd.metric("Suggerito", f"€{sug['suggested_price']:.0f}", delta_pct)
+                    if ce.button("✅ Approva", key=f"app_{sug['id']}", use_container_width=True, type="primary"):
+                        supabase.table('price_suggestions').update({
+                            "status": "approved",
+                            "decided_at": datetime.datetime.utcnow().isoformat()
+                        }).eq('id', sug['id']).execute()
+                        st.rerun()
+                    if cf.button("❌ Rifiuta", key=f"rif_{sug['id']}", use_container_width=True):
+                        supabase.table('price_suggestions').update({
+                            "status": "rejected",
+                            "decided_at": datetime.datetime.utcnow().isoformat()
+                        }).eq('id', sug['id']).execute()
+                        st.rerun()
+        else:
+            st.info("Nessun suggerimento in attesa. Generane uno nuovo dalla sezione sopra.")
+
+        st.divider()
+
+        # --- SEZIONE 3: STORICO DECISIONI ---
+        with st.expander("📋 Storico Decisioni", expanded=False):
+            try:
+                res_hist = supabase.table('price_suggestions').select('*') \
+                    .eq('user_id', USER_ID).neq('status', 'pending') \
+                    .order('decided_at', desc=True).limit(50).execute()
+            except Exception:
+                res_hist = None
+            if res_hist and res_hist.data:
+                df_hist = pd.DataFrame(res_hist.data)[
+                    ['property_name', 'date_from', 'date_to', 'scenario',
+                     'current_price', 'suggested_price', 'status', 'decided_at']
+                ]
+                df_hist.columns = ['Proprietà', 'Dal', 'Al', 'Scenario', 'Att. (€)', 'Sug. (€)', 'Decisione', 'Deciso il']
+                df_hist['Decisione'] = df_hist['Decisione'].map({'approved': '✅ Approvato', 'rejected': '❌ Rifiutato'})
+                df_hist['Deciso il'] = pd.to_datetime(df_hist['Deciso il']).dt.strftime('%d/%m/%Y %H:%M')
+                st.dataframe(df_hist, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nessuna decisione ancora registrata.")
 
     with tab_dati:
         st.header("⚙️ Gestione Dati")
