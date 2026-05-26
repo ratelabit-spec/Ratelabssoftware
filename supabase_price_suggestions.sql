@@ -28,5 +28,5 @@ ALTER TABLE price_suggestions ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "User can access own price_suggestions" ON price_suggestions;
 CREATE POLICY "User can access own price_suggestions"
   ON price_suggestions FOR ALL
-  USING (user_id = auth.uid()::text)
-  WITH CHECK (user_id = auth.uid()::text);
+  USING (user_id::text = auth.uid()::text)
+  WITH CHECK (user_id::text = auth.uid()::text);

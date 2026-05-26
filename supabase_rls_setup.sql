@@ -24,35 +24,35 @@ DROP POLICY IF EXISTS "User can access own comp_set_prices" ON comp_set_prices;
 
 CREATE POLICY "User can access own reservations"
   ON reservations FOR ALL
-  USING (user_id = auth.uid()::text)
-  WITH CHECK (user_id = auth.uid()::text);
+  USING (user_id::text = auth.uid()::text)
+  WITH CHECK (user_id::text = auth.uid()::text);
 
 CREATE POLICY "User can access own properties"
   ON properties FOR ALL
-  USING (user_id = auth.uid()::text)
-  WITH CHECK (user_id = auth.uid()::text);
+  USING (user_id::text = auth.uid()::text)
+  WITH CHECK (user_id::text = auth.uid()::text);
 
 CREATE POLICY "User can access own fixed_costs"
   ON fixed_costs FOR ALL
-  USING (user_id = auth.uid()::text)
-  WITH CHECK (user_id = auth.uid()::text);
+  USING (user_id::text = auth.uid()::text)
+  WITH CHECK (user_id::text = auth.uid()::text);
 
 CREATE POLICY "User can access own variable_costs"
   ON variable_costs FOR ALL
-  USING (user_id = auth.uid()::text)
-  WITH CHECK (user_id = auth.uid()::text);
+  USING (user_id::text = auth.uid()::text)
+  WITH CHECK (user_id::text = auth.uid()::text);
 
 CREATE POLICY "User can access own competitors"
   ON competitors FOR ALL
-  USING (user_id = auth.uid()::text)
-  WITH CHECK (user_id = auth.uid()::text);
+  USING (user_id::text = auth.uid()::text)
+  WITH CHECK (user_id::text = auth.uid()::text);
 
 -- comp_set_prices joins through competitors, so policy uses subquery
 CREATE POLICY "User can access own comp_set_prices"
   ON comp_set_prices FOR ALL
   USING (
     competitor_id IN (
-      SELECT id FROM competitors WHERE user_id = auth.uid()::text
+      SELECT id FROM competitors WHERE user_id::text = auth.uid()::text
     )
   );
 
