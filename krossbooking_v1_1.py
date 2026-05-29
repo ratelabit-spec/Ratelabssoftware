@@ -40,6 +40,26 @@ except Exception as e:
 MESI_IT = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
            'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre']
 
+# --- PALETTE & TEMA GRAFICI ---
+C_CY   = "#1E6FD9"          # Blu — Anno Corrente
+C_STLY = "#94A3B8"          # Grigio ardesia — STLY
+C_POS  = "#10B981"          # Verde — valori positivi
+C_NEG  = "#EF4444"          # Rosso — alert / negativi
+C_WARN = "#F59E0B"          # Ambra — warning
+C_TEAL = "#0EA5E9"          # Azzurro — accento
+_BG    = "rgba(0,0,0,0)"    # Sfondo trasparente
+_GRID  = "#E2E8F0"          # Grigio griglia
+
+def _fig_layout(**kw):
+    base = dict(
+        plot_bgcolor=_BG, paper_bgcolor=_BG,
+        font=dict(family="sans-serif", size=13, color="#1A202C"),
+        margin=dict(t=50, b=20, l=10, r=10),
+        hoverlabel=dict(bgcolor="white", font_size=13, bordercolor="#E2E8F0"),
+    )
+    base.update(kw)
+    return base
+
 # =====================================================
 # FUNZIONI DI CARICAMENTO DAL CLOUD
 # =====================================================
@@ -505,10 +525,22 @@ Obiettivo: [risultato atteso]
             st.markdown("---")
             col_ch1, col_ch2 = st.columns(2)
             with col_ch1:
-                fig_pie = px.pie(df_ch, values='Ricavi', names='channel_group', title="Quota Ricavi per Canale")
+                fig_pie = px.pie(df_ch, values='Ricavi', names='channel_group',
+                                 title="Quota Ricavi per Canale",
+                                 color_discrete_sequence=[C_CY, C_TEAL, C_STLY, C_WARN, C_POS])
+                fig_pie.update_traces(textposition='inside', textinfo='percent+label',
+                                      pull=[0.03]*len(df_ch))
+                fig_pie.update_layout(**_fig_layout())
                 st.plotly_chart(fig_pie, use_container_width=True)
             with col_ch2:
-                fig_adr = px.bar(df_ch.sort_values('ADR', ascending=True), x='ADR', y='channel_group', orientation='h', title="ADR per Canale (€)")
+                df_adr_sorted = df_ch.sort_values('ADR', ascending=True)
+                fig_adr = px.bar(df_adr_sorted, x='ADR', y='channel_group', orientation='h',
+                                 title="ADR per Canale (€)",
+                                 text=df_adr_sorted['ADR'].apply(lambda x: f"€{x:,.0f}"))
+                fig_adr.update_traces(marker_color=C_CY, textposition='outside')
+                fig_adr.update_layout(**_fig_layout(showlegend=False))
+                fig_adr.update_xaxes(showgrid=True, gridcolor=_GRID)
+                fig_adr.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_adr, use_container_width=True)
         else:
             st.info("⚠️ Nessun ricavo registrato per questo periodo, i grafici dei canali non sono disponibili.")
@@ -521,7 +553,13 @@ Obiettivo: [risultato atteso]
                 Netto=('pm_net', 'sum'),
                 Commissioni=('commission_amount', 'sum')
             ).reset_index()
-            fig_netto = px.bar(df_netto_apt.sort_values('Netto', ascending=True), x=['Netto', 'Commissioni'], y='unit_id', orientation='h', barmode='stack', title="Netto vs Commissioni per Appartamento (€)")
+            fig_netto = px.bar(df_netto_apt.sort_values('Netto', ascending=True),
+                               x=['Netto', 'Commissioni'], y='unit_id', orientation='h',
+                               barmode='stack', title="Netto vs Commissioni per Appartamento (€)",
+                               color_discrete_map={'Netto': C_POS, 'Commissioni': C_NEG})
+            fig_netto.update_layout(**_fig_layout())
+            fig_netto.update_xaxes(showgrid=True, gridcolor=_GRID)
+            fig_netto.update_yaxes(showgrid=False)
             st.plotly_chart(fig_netto, use_container_width=True)
         else:
             st.info("⚠️ Dati insufficienti per calcolare il Netto Property Manager in questo periodo.")
@@ -545,21 +583,33 @@ Obiettivo: [risultato atteso]
             col_g1, col_g2, col_g3 = st.columns(3)
             
             with col_g1:
-                fig_r = px.bar(df_apt, x='Ricavi_Lordi', y='unit_id', orientation='h', title="💰 Ricavi Lordi (€)", text=df_apt['Ricavi_Lordi'].apply(lambda x: f"€ {x:,.0f}"))
-                fig_r.update_traces(textposition='outside')
-                fig_r.update_layout(showlegend=False)
+                fig_r = px.bar(df_apt, x='Ricavi_Lordi', y='unit_id', orientation='h',
+                               title="💰 Ricavi Lordi (€)",
+                               text=df_apt['Ricavi_Lordi'].apply(lambda x: f"€{x:,.0f}"))
+                fig_r.update_traces(marker_color=C_CY, textposition='outside')
+                fig_r.update_layout(**_fig_layout(showlegend=False))
+                fig_r.update_xaxes(showgrid=True, gridcolor=_GRID)
+                fig_r.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_r, use_container_width=True)
-            
+
             with col_g2:
-                fig_o = px.bar(df_apt_occ, x='Occupazione', y='unit_id', orientation='h', title="🛏️ Occupazione (%)", text=df_apt_occ['Occupazione'].apply(lambda x: f"{x:.1f}%"))
-                fig_o.update_traces(textposition='outside')
-                fig_o.update_layout(showlegend=False)
+                fig_o = px.bar(df_apt_occ, x='Occupazione', y='unit_id', orientation='h',
+                               title="🛏️ Occupazione (%)",
+                               text=df_apt_occ['Occupazione'].apply(lambda x: f"{x:.1f}%"))
+                fig_o.update_traces(marker_color=C_TEAL, textposition='outside')
+                fig_o.update_layout(**_fig_layout(showlegend=False))
+                fig_o.update_xaxes(showgrid=True, gridcolor=_GRID)
+                fig_o.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_o, use_container_width=True)
-            
+
             with col_g3:
-                fig_revpar = px.bar(df_apt_revpar, x='Net_RevPAR_Real', y='unit_id', orientation='h', title="🏠 Net RevPAR Real (€)", text=df_apt_revpar['Net_RevPAR_Real'].apply(lambda x: f"€ {x:,.1f}"))
-                fig_revpar.update_traces(textposition='outside')
-                fig_revpar.update_layout(showlegend=False)
+                fig_revpar = px.bar(df_apt_revpar, x='Net_RevPAR_Real', y='unit_id', orientation='h',
+                                    title="🏠 Net RevPAR Real (€)",
+                                    text=df_apt_revpar['Net_RevPAR_Real'].apply(lambda x: f"€{x:,.1f}"))
+                fig_revpar.update_traces(marker_color=C_POS, textposition='outside')
+                fig_revpar.update_layout(**_fig_layout(showlegend=False))
+                fig_revpar.update_xaxes(showgrid=True, gridcolor=_GRID)
+                fig_revpar.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_revpar, use_container_width=True)
         else:
             st.info("⚠️ Nessuna performance registrata per gli appartamenti in questo periodo.")
@@ -588,13 +638,32 @@ Obiettivo: [risultato atteso]
 
         if curve_data:
             df_curve = pd.concat(curve_data)
-            fig_curve = px.line(df_curve, x='Data Allineata', y='Cumulato', color='Anno', line_shape='hv', title=f"Evoluzione {metrica_curve.split()[0]}")
-            
+            fig_curve = px.line(
+                df_curve, x='Data Allineata', y='Cumulato', color='Anno',
+                line_shape='spline',
+                color_discrete_map={
+                    'Anno Corrente (OTB)':   C_CY,
+                    'STLY (Storico Finale)': C_STLY,
+                },
+                title=f"Booking Curve — {metrica_curve.split()[0]} Cumulati"
+            )
+            fig_curve.update_traces(line=dict(width=2.5))
+            for trace in fig_curve.data:
+                if 'Corrente' in trace.name:
+                    trace.fill = 'tozeroy'
+                    trace.fillcolor = 'rgba(30,111,217,0.07)'
+
             fecha_str = fecha_hoy_pd.strftime('%Y-%m-%d')
-            fig_curve.add_vline(x=fecha_str, line_dash="dash", line_color="red")
-            fig_curve.add_annotation(x=fecha_str, y=1.02, yref="paper", text="Foto OTB (Oggi)", showarrow=False, font=dict(color="red", size=12))
-            
-            fig_curve.update_layout(legend_title_text='')
+            fig_curve.add_vline(x=fecha_str, line_dash="dash", line_color=C_NEG, line_width=1.5)
+            fig_curve.add_annotation(
+                x=fecha_str, y=1.02, yref="paper", text="📍 Oggi",
+                showarrow=False, font=dict(color=C_NEG, size=12)
+            )
+            fig_curve.update_layout(
+                **_fig_layout(legend_title_text='', hovermode='x unified', height=420)
+            )
+            fig_curve.update_xaxes(showgrid=True, gridcolor=_GRID, zeroline=False)
+            fig_curve.update_yaxes(showgrid=True, gridcolor=_GRID, zeroline=False)
             st.plotly_chart(fig_curve, use_container_width=True)
         else:
             st.info("⚠️ Nessuna prenotazione disponibile per tracciare la curva in questo periodo.")
@@ -722,34 +791,34 @@ Obiettivo: [risultato atteso]
             
             # Dibujamos las líneas normales solo para los días disponibles
             fig = px.line(
-                df_available, 
-                x="stay_date", 
-                y="price", 
-                color="name", 
-                markers=True,
-                title=f"Andamento Prezzi dal {date_range[0].strftime('%d/%m')} al {date_range[1].strftime('%d/%m')}",
+                df_available,
+                x="stay_date", y="price", color="name",
+                markers=True, line_shape='spline',
+                title=f"Andamento Prezzi Mercato: {date_range[0].strftime('%d/%m')} – {date_range[1].strftime('%d/%m')}",
                 labels={"stay_date": "Data Soggiorno", "price": "Prezzo (€)", "name": "Competitor"}
             )
-            
-            # Añadimos los marcadores de "Sold Out" (cruces rojas en la parte baja del gráfico)
+            fig.update_traces(line=dict(width=2), marker=dict(size=6))
+
             if not df_soldout.empty:
                 fig.add_scatter(
                     x=df_soldout['stay_date'],
-                    y=[0] * len(df_soldout), # Los ponemos en el eje Y=0 para que resalten abajo
+                    y=[df_available['price'].min() * 0.92 if not df_available.empty else 0] * len(df_soldout),
                     mode='markers',
-                    marker=dict(symbol='x', size=12, color='red'),
+                    marker=dict(symbol='x', size=10, color=C_NEG, line=dict(width=2)),
                     name='Sold Out',
-                    text=df_soldout['name'], # Para ver quién está lleno al pasar el ratón
+                    text=df_soldout['name'],
                     hovertemplate="<b>%{text}</b><br>❌ Sold Out"
                 )
-            
-            # Mejoramos el diseño y forzamos al eje Y a empezar en 0 para ver bien los Sold Outs
+
             fig.update_layout(
-                hovermode="x unified", 
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                yaxis_rangemode='tozero' 
+                **_fig_layout(
+                    hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    yaxis_rangemode='tozero'
+                )
             )
-            
+            fig.update_xaxes(showgrid=True, gridcolor=_GRID, zeroline=False)
+            fig.update_yaxes(showgrid=True, gridcolor=_GRID)
             st.plotly_chart(fig, use_container_width=True)
             
             with st.expander("Vedi dati grezzi"):
@@ -841,18 +910,23 @@ Obiettivo: [risultato atteso]
                     orientation = "v",
                     measure = ["relative", "relative", "relative", "relative", "total"],
                     x = ["Fatturato Lordo", "Comm. OTA", "Costi Variabili", "Costi Fissi", "Netto PM"],
-                    text = [f"€{fatturato:,.0f}", f"€{ota:,.0f}", f"€{variabili:,.0f}", f"€{fissi:,.0f}", f"€{netto:,.0f}"],
-                    y = [fatturato, ota, variabili, fissi, netto],
-                    connector = {"line":{"color":"#444"}},
-                    decreasing = {"marker":{"color":"#e74c3c"}}, 
-                    totals = {"marker":{"color":"#2ecc71" if netto > 0 else "#e74c3c"}}
+                    text = [f"€{fatturato:,.0f}", f"-€{ota:,.0f}", f"-€{variabili:,.0f}", f"-€{fissi:,.0f}", f"€{netto:,.0f}"],
+                    y = [fatturato, -ota, -variabili, -fissi, netto],
+                    textposition = "outside",
+                    connector = {"line": {"color": _GRID, "width": 1}},
+                    increasing  = {"marker": {"color": C_CY}},
+                    decreasing  = {"marker": {"color": C_NEG}},
+                    totals      = {"marker": {"color": C_POS if netto > 0 else C_NEG}}
                 ))
 
                 fig.update_layout(
-                    title=f"Cascata del Margine: {prop_name} ({anno})", 
-                    height=500, 
-                    plot_bgcolor="rgba(0,0,0,0)"
+                    **_fig_layout(
+                        title=f"Cascata del Margine: {prop_name} ({anno})",
+                        height=460,
+                    )
                 )
+                fig.update_xaxes(showgrid=False)
+                fig.update_yaxes(showgrid=True, gridcolor=_GRID)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info(f"Nessuna prenotazione trovata per {prop_name} nell'anno {anno}.")
