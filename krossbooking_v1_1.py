@@ -305,6 +305,8 @@ if not df_cloud.empty:
     costos_configurados = not df_fix_portfolio.empty or not df_var_portfolio.empty
 
     bottom_rate = 0.0
+    fixed_per_night = 0.0
+    var_per_night   = 0.0
     if costos_configurados:
         fixed_annual = (
             df_fix_portfolio[df_fix_portfolio['frequency'] == 'yearly']['amount'].sum() +
@@ -650,6 +652,100 @@ Obiettivo: [risultato atteso]
             st.plotly_chart(fig_curve, use_container_width=True)
         else:
             st.info("⚠️ Nessuna prenotazione disponibile per tracciare la curva in questo periodo.")
+
+    with tab_costi:
+        st.divider()
+        st.subheader("📊 Costo per OTA & Margine per Canale")
+
+        if df_cy_otb.empty or df_cy_otb['gross_revenue'].sum() == 0:
+            st.info("⚠️ Nessun dato OTB disponibile per questo periodo.")
+        else:
+            # Costruisce tabella canali con scomposizione costi
+            df_ota = df_cy_otb.groupby('channel_group').agg(
+                Ricavi=('gross_revenue', 'sum'),
+                Notti=('nights', 'sum'),
+                Commissioni=('commission_amount', 'sum'),
+                Prenotazioni=('id', 'count')
+            ).reset_index()
+            df_ota['ADR']          = df_ota.apply(lambda r: r['Ricavi'] / r['Notti'] if r['Notti'] > 0 else 0, axis=1)
+            df_ota['Comm%']        = df_ota.apply(lambda r: r['Commissioni'] / r['Ricavi'] * 100 if r['Ricavi'] > 0 else 0, axis=1)
+            df_ota['Comm/notte']   = df_ota['ADR'] * df_ota['Comm%'] / 100
+            df_ota['Var/notte']    = var_per_night
+            df_ota['Fissi/notte']  = fixed_per_night
+            df_ota['Costo totale'] = df_ota['Comm/notte'] + var_per_night + fixed_per_night
+            df_ota['Netto/notte']  = df_ota['ADR'] - df_ota['Costo totale']
+            df_ota['Margine%']     = df_ota.apply(lambda r: r['Netto/notte'] / r['ADR'] * 100 if r['ADR'] > 0 else 0, axis=1)
+
+            if not costos_configurados:
+                st.warning("⚠️ Configura i costi fissi e variabili in questa tab per vedere i margini reali. Ora vengono mostrate solo commissioni OTA.")
+
+            # ── Tabella dettaglio ──
+            st.markdown("##### 🧮 Scomposizione Costi per Canale (€/notte)")
+            cols_show = ['channel_group', 'ADR', 'Comm%', 'Comm/notte', 'Var/notte', 'Fissi/notte', 'Costo totale', 'Netto/notte', 'Margine%']
+            df_display = df_ota[cols_show].sort_values('Margine%', ascending=False).rename(columns={'channel_group': 'Canale'})
+
+            def _color_margin(val):
+                if not isinstance(val, (int, float)):
+                    return ''
+                if val >= 30: return f'color: {C_POS}; font-weight:bold'
+                if val >= 10: return f'color: {C_WARN}; font-weight:bold'
+                return f'color: {C_NEG}; font-weight:bold'
+
+            fmt = {
+                'ADR': '€{:.2f}', 'Comm/notte': '€{:.2f}', 'Var/notte': '€{:.2f}',
+                'Fissi/notte': '€{:.2f}', 'Costo totale': '€{:.2f}', 'Netto/notte': '€{:.2f}',
+                'Comm%': '{:.1f}%', 'Margine%': '{:.1f}%'
+            }
+            st.dataframe(
+                df_display.style.format(fmt).map(_color_margin, subset=['Margine%']),
+                use_container_width=True, hide_index=True
+            )
+
+            st.markdown("##### 📈 Margine Netto per Canale (€/notte)")
+            col_l, col_r = st.columns(2)
+
+            with col_l:
+                fig_m = px.bar(
+                    df_ota.sort_values('Margine%', ascending=True),
+                    x='Margine%', y='channel_group', orientation='h',
+                    title="Margine % per Canale",
+                    text=df_ota.sort_values('Margine%', ascending=True)['Margine%'].apply(lambda x: f"{x:.1f}%"),
+                    color='Margine%',
+                    color_continuous_scale=[[0, C_NEG], [0.3, C_WARN], [1, C_POS]],
+                )
+                fig_m.update_traces(textposition='outside')
+                fig_m.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False))
+                fig_m.update_xaxes(showgrid=True, gridcolor=_GRID)
+                fig_m.update_yaxes(showgrid=False)
+                st.plotly_chart(fig_m, use_container_width=True)
+
+            with col_r:
+                fig_n = px.bar(
+                    df_ota.sort_values('Netto/notte', ascending=True),
+                    x='Netto/notte', y='channel_group', orientation='h',
+                    title="Netto €/notte per Canale",
+                    text=df_ota.sort_values('Netto/notte', ascending=True)['Netto/notte'].apply(lambda x: f"€{x:.2f}"),
+                    color='Netto/notte',
+                    color_continuous_scale=[[0, C_NEG], [0.3, C_WARN], [1, C_POS]],
+                )
+                fig_n.update_traces(textposition='outside')
+                fig_n.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False))
+                fig_n.update_xaxes(showgrid=True, gridcolor=_GRID)
+                fig_n.update_yaxes(showgrid=False)
+                st.plotly_chart(fig_n, use_container_width=True)
+
+            # ── Insight automatico ──
+            if costos_configurados and len(df_ota) > 1:
+                best  = df_ota.loc[df_ota['Margine%'].idxmax(), 'channel_group']
+                worst = df_ota.loc[df_ota['Margine%'].idxmin(), 'channel_group']
+                best_m  = df_ota['Margine%'].max()
+                worst_m = df_ota['Margine%'].min()
+                gap = best_m - worst_m
+                st.info(
+                    f"💡 **{best}** è il canale più redditizio ({best_m:.1f}% margine). "
+                    f"**{worst}** è il meno redditizio ({worst_m:.1f}%). "
+                    f"Gap di {gap:.1f} punti percentuali — considera di spingere il canale più profittevole."
+                )
 
     with tab_mercato:
         st.subheader("🚨 Radar di Sotto-Rendimento")
