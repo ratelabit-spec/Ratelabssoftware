@@ -8,6 +8,7 @@ import math
 from datetime import date
 from supabase import create_client, Client
 from adapter_krossbooking import load_and_clean_krossbooking
+from adapter_generic import apply_mapping, validate_mapping, FIELD_LABELS, REQUIRED_FIELDS
 from etl_costs import update_or_insert_cost
 from etl_metrics import calculate_property_margins
 
@@ -1155,77 +1156,146 @@ Obiettivo: [risultato atteso]
         st.header("⚙️ Gestione Dati")
         
         # --- SEZIONE 1: SINCRONIZZAZIONE PRENOTAZIONI ---
-        st.subheader("☁️ Aggiorna il Database (KrossBooking)")
-        st.info("Carica l'ultimo export di KrossBooking. Il sistema aggiungerà le nuove prenotazioni (incluse le cancellazioni) e aggiornerà quelle modificate.")
-        
-        file_upload = st.file_uploader("📂 Carica file Excel", type=['xlsx'])
-        
-        if file_upload:
-            if st.button("🚀 Sincronizza nel Cloud"):
-                with st.spinner("Analisi e caricamento in corso..."):
-                    # 1. Recuperamos AMBOS DataFrames (Activas y Canceladas)
-                    df_limpio, df_cancellate = load_and_clean_krossbooking(file_upload)
-                    
-                    # 2. Las unimos en un solo DataFrame masivo
-                    dfs_to_concat = []
-                    if df_limpio is not None and not df_limpio.empty:
-                        dfs_to_concat.append(df_limpio)
-                    if df_cancellate is not None and not df_cancellate.empty:
-                        dfs_to_concat.append(df_cancellate)
-                    
-                    if dfs_to_concat:
-                        df_total = pd.concat(dfs_to_concat, ignore_index=True)
-                        
+        st.subheader("☁️ Aggiorna il Database")
+
+        pms_mode = st.radio("Seleziona il tuo PMS:", ["KrossBooking", "Altro PMS"], horizontal=True)
+
+        # ── Helper: upsert normalizzato (condiviso da entrambi i flussi) ──
+        def _upsert_reservations(df_total):
+            unique_props = df_total['unit_id'].dropna().unique()
+            prop_map = {}
+            for prop_name in unique_props:
+                res = supabase.table('properties').upsert(
+                    {"user_id": USER_ID, "kross_unit_id": prop_name},
+                    on_conflict='user_id, kross_unit_id'
+                ).execute()
+                prop_map[prop_name] = res.data[0]['id']
+
+            records = []
+            for _, row in df_total.iterrows():
+                records.append({
+                    "user_id":             USER_ID,
+                    "property_id":         prop_map.get(row['unit_id']),
+                    "pms_reservation_id":  str(row['pms_reservation_id']),
+                    "check_in_date":       row['check_in_date'].strftime('%Y-%m-%d') if pd.notnull(row['check_in_date']) else None,
+                    "check_out_date":      row['check_out_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('check_out_date')) else None,
+                    "booking_date":        row['booking_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('booking_date')) else None,
+                    "gross_revenue":       float(row['gross_revenue']),
+                    "commission_amount":   float(row['commission_amount']),
+                    "net_revenue":         float(row['net_revenue']),
+                    "pm_net":              float(row['pm_net']),
+                    "owner_net":           float(row['owner_net']),
+                    "nights":              int(row['nights']),
+                    "lead_time":           int(row['lead_time']),
+                    "status":              str(row['status']),
+                    "channel":             str(row.get('channel', '')),
+                    "channel_group":       str(row['channel_group']),
+                })
+
+            chunk_size = 500
+            total_chunks = math.ceil(len(records) / chunk_size)
+            bar = st.progress(0, text="Caricamento in corso...")
+            for i in range(total_chunks):
+                chunk = records[i * chunk_size:(i + 1) * chunk_size]
+                supabase.table('reservations').upsert(chunk, on_conflict='user_id, pms_reservation_id').execute()
+                bar.progress((i + 1) / total_chunks, text=f"Lotto {i+1}/{total_chunks} caricato...")
+            return len(records)
+
+        # ════════════════════════════════════
+        # FLUSSO A — KrossBooking (invariato)
+        # ════════════════════════════════════
+        if pms_mode == "KrossBooking":
+            st.info("Carica l'ultimo export di KrossBooking. Il sistema aggiungerà le nuove prenotazioni e aggiornerà quelle modificate.")
+            file_upload = st.file_uploader("📂 Carica file Excel KrossBooking", type=['xlsx'])
+            if file_upload:
+                if st.button("🚀 Sincronizza nel Cloud"):
+                    with st.spinner("Analisi e caricamento in corso..."):
+                        df_limpio, df_cancellate = load_and_clean_krossbooking(file_upload)
+                        dfs = [d for d in [df_limpio, df_cancellate] if d is not None and not d.empty]
+                        if dfs:
+                            df_total = pd.concat(dfs, ignore_index=True)
+                            df_total['pms_reservation_id'] = df_total['id'].astype(str)
+                            try:
+                                n = _upsert_reservations(df_total)
+                                st.cache_data.clear()
+                                st.success(f"✅ Sincronizzazione completata! ({n} record analizzati, incluse cancellazioni).")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Errore durante l'aggiornamento: {e}")
+                        else:
+                            st.warning("Il file caricato non contiene dati validi.")
+
+        # ════════════════════════════════════
+        # FLUSSO B — Altro PMS (parser generico)
+        # ════════════════════════════════════
+        else:
+            st.info("Carica un export Excel da qualsiasi PMS. La prima volta configurerai il mapping delle colonne — verrà salvato per i prossimi upload.")
+
+            pms_name = st.text_input("Nome PMS (es. Mews, Opera, Beds24, ecc.)", placeholder="Il tuo PMS")
+            file_upload_gen = st.file_uploader("📂 Carica file Excel", type=['xlsx', 'xls'], key="gen_upload")
+
+            if file_upload_gen and pms_name:
+                df_raw = pd.read_excel(file_upload_gen)
+                raw_cols = list(df_raw.columns.astype(str))
+                opts = ["(Non mappare)"] + raw_cols
+
+                # Cerca mapping salvato per questo PMS
+                saved_res = supabase.table('pms_mappings').select('mapping') \
+                    .eq('user_id', USER_ID).eq('pms_name', pms_name).execute()
+                saved_mapping = saved_res.data[0]['mapping'] if saved_res.data else {}
+
+                if saved_mapping:
+                    st.success(f"✅ Mapping '{pms_name}' trovato — precompilato. Verifica e conferma.")
+                else:
+                    st.warning("Nessun mapping salvato per questo PMS. Configura le colonne qui sotto.")
+
+                with st.expander("🗺️ Configura Mapping Colonne", expanded=not bool(saved_mapping)):
+                    new_mapping = {}
+                    col_a, col_b = st.columns(2)
+                    for idx, (field, label) in enumerate(FIELD_LABELS.items()):
+                        container = col_a if idx % 2 == 0 else col_b
+                        saved_val = saved_mapping.get(field, "(Non mappare)")
+                        default_idx = opts.index(saved_val) if saved_val in opts else 0
+                        chosen = container.selectbox(label, opts, index=default_idx, key=f"gmap_{field}")
+                        new_mapping[field] = chosen if chosen != "(Non mappare)" else None
+
+                # Validazione
+                errors = validate_mapping(new_mapping)
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                else:
+                    col_prev, col_load = st.columns(2)
+
+                    if col_prev.button("👁️ Anteprima (prime 5 righe)"):
                         try:
-                            # Sincronizar apartamentos
-                            unique_props = df_total['unit_id'].dropna().unique()
-                            prop_mapping = {}
-                            for prop_name in unique_props:
-                                res = supabase.table('properties').upsert(
-                                    {"user_id": USER_ID, "kross_unit_id": prop_name},
-                                    on_conflict='user_id, kross_unit_id'
-                                ).execute()
-                                prop_mapping[prop_name] = res.data[0]['id']
-
-                            # Preparar registros
-                            records = []
-                            for _, row in df_total.iterrows():
-                                record = {
-                                    "user_id": USER_ID,
-                                    "property_id": prop_mapping[row['unit_id']],
-                                    "pms_reservation_id": str(row['id']),
-                                    "check_in_date": row['check_in_date'].strftime('%Y-%m-%d'),
-                                    "check_out_date": row['check_out_date'].strftime('%Y-%m-%d') if pd.notnull(row['check_out_date']) else None,
-                                    "booking_date": row['booking_date'].strftime('%Y-%m-%d'),
-                                    "gross_revenue": float(row['gross_revenue']) if pd.notnull(row['gross_revenue']) else 0,
-                                    "commission_amount": float(row['commission_amount']) if pd.notnull(row['commission_amount']) else 0,
-                                    "net_revenue": float(row['net_revenue']) if pd.notnull(row['net_revenue']) else 0,
-                                    "pm_net": float(row['pm_net']) if pd.notnull(row['pm_net']) else 0,
-                                    "owner_net": float(row['owner_net']) if pd.notnull(row['owner_net']) else 0,
-                                    "nights": int(row['nights']) if pd.notnull(row['nights']) else 0,
-                                    "lead_time": int(row['lead_time']) if pd.notnull(row['lead_time']) else 0,
-                                    "status": str(row['status']),
-                                    "channel": str(row.get('channel', '')),
-                                    "channel_group": str(row['channel_group'])
-                                }
-                                records.append(record)
-
-                            # Upsert en chunks de 500 para evitar Payload Too Large
-                            chunk_size = 500
-                            total_chunks = math.ceil(len(records) / chunk_size)
-                            progress_bar = st.progress(0, text="Caricamento in corso...")
-                            for i in range(total_chunks):
-                                chunk = records[i * chunk_size:(i + 1) * chunk_size]
-                                supabase.table('reservations').upsert(chunk, on_conflict='user_id, pms_reservation_id').execute()
-                                progress_bar.progress((i + 1) / total_chunks, text=f"Lotto {i+1}/{total_chunks} caricato...")
-
-                            st.cache_data.clear()
-                            st.success(f"✅ Sincronizzazione completata! ({len(records)} record analizzati, incluse cancellazioni).")
-                            st.rerun()
+                            df_norm = apply_mapping(df_raw, new_mapping)
+                            st.dataframe(df_norm.head(5), use_container_width=True)
+                            st.caption(f"{len(df_norm)} prenotazioni valide trovate nel file.")
                         except Exception as e:
-                            st.error(f"Errore durante l'aggiornamento: {e}")
-                    else:
-                        st.warning("Il file caricato non contiene dati validi.")
+                            st.error(f"Errore nell'anteprima: {e}")
+
+                    if col_load.button("🚀 Carica & Salva Mapping", type="primary"):
+                        with st.spinner("Normalizzazione e caricamento in corso..."):
+                            try:
+                                # Salva mapping per riuso futuro
+                                supabase.table('pms_mappings').upsert(
+                                    {"user_id": USER_ID, "pms_name": pms_name, "mapping": new_mapping},
+                                    on_conflict="user_id,pms_name"
+                                ).execute()
+
+                                df_norm = apply_mapping(df_raw, new_mapping)
+                                if df_norm.empty:
+                                    st.warning("Nessuna prenotazione valida trovata dopo la normalizzazione. Verifica il mapping.")
+                                else:
+                                    n = _upsert_reservations(df_norm)
+                                    st.cache_data.clear()
+                                    st.success(f"✅ {n} prenotazioni caricate da '{pms_name}'. Mapping salvato per i prossimi upload.")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Errore: {e}")
+            elif file_upload_gen and not pms_name:
+                st.warning("Inserisci il nome del PMS per salvare il mapping.")
         
         st.divider()
         
