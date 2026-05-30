@@ -341,11 +341,11 @@ if not df_cloud.empty:
 
     st.caption(f"📍 **{txt_filtro}** | Mese: **{mes_nombre}** | OTB al: **{fecha_hoy.strftime('%d/%m/%Y')}**")
 
-    tab_kpi, tab_canali, tab_netto, tab_netto_pm, tab_grafici, tab_curve, tab_radar, tab_obiettivi, tab_compset, tab_prezzi, tab_dati = st.tabs([
-    "📊 KPI & Strategia", "📡 Canali", "💼 Netto PM", "💰 Analisi Costi", "📈 Grafici OTB", "🌊 Booking Curve", "🚨 Radar Rendimento", "🎯 Tracker Obiettivi", "🕵️‍♂️ Comp Set", "💡 Prezzi", "☁️ Gestione Dati"
-])
+    tab_revenue, tab_costi, tab_mercato, tab_strategia, tab_dati = st.tabs([
+        "📊 Revenue", "💰 Costi & Margini", "🕵️ Mercato", "💡 Strategia", "⚙️ Dati"
+    ])
 
-    with tab_kpi:
+    with tab_revenue:
         st.subheader("Riepilogo Performance")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("💰 Ricavi OTB", f"€ {k['rev']:,.0f}", f"{k['var_rev']:+.1f}% vs STLY" if k['rev_ly'] > 0 else "")
@@ -420,53 +420,43 @@ if not df_cloud.empty:
         else:
             st.info("Nessun dato disponibile per il Pickup Report.")
 
-        st.divider()
 
-        # =====================================================
-        # CERVELLO STRATEGICO — IA (Gemini)
-        # =====================================================
-        st.subheader("🤖 Cervello Strategico — Analisi IA (Gemini)")
-
-        # Bottom Rate context
-        if bottom_rate > 0:
-            st.success(f"🔒 **Bottom Rate attivo:** €{bottom_rate:.2f}/notte — l'IA non suggerirà mai strategie sotto questa soglia.")
-            sezione_br = (
-                f"⚠️ VINCOLO ASSOLUTO — BOTTOM RATE: €{bottom_rate:.2f}/notte "
-                f"(soglia matematica di pareggio calcolata dai costi operativi reali + commissioni OTA medie del portafoglio). "
-                f"REGOLA FERREA: non suggerire mai strategie che portino l'ADR al di sotto di €{bottom_rate:.2f}. "
-                f"È il pavimento matematico, non si negozia."
+    # ── AI section variables (rendered in tab_strategia below) ──
+    _sezione_br = ""
+    _sezione_comp = ""
+    if bottom_rate > 0:
+        _sezione_br = (
+            f"⚠️ VINCOLO ASSOLUTO — BOTTOM RATE: €{bottom_rate:.2f}/notte "
+            f"(soglia matematica di pareggio calcolata dai costi operativi reali + commissioni OTA medie del portafoglio). "
+            f"REGOLA FERREA: non suggerire mai strategie che portino l'ADR al di sotto di €{bottom_rate:.2f}. "
+            f"È il pavimento matematico, non si negozia."
+        )
+    else:
+        _sezione_br = "ℹ️ Bottom Rate non disponibile (nessun costo operativo configurato). Analizza in base ai dati di mercato."
+    if not df_market.empty:
+        comp_mes = df_market[df_market['stay_date'].dt.month == mes_interes]
+        if not comp_mes.empty:
+            avg_comp = comp_mes[comp_mes['is_available'] == True]['price'].mean()
+            n_soldout = comp_mes[comp_mes['is_available'] == False]['name'].nunique()
+            _sezione_comp = (
+                f"\n📊 MERCATO: prezzo medio competitor €{avg_comp:.0f}/notte per {mes_nombre}. "
+                f"{n_soldout} competitor già sold out."
             )
-        else:
-            st.warning("⚠️ Bottom Rate non calcolato — configura i costi operativi nel tab 'Analisi Costi' per attivare il vincolo matematico sull'IA.")
-            sezione_br = "ℹ️ Bottom Rate non disponibile (nessun costo operativo configurato). Analizza in base ai dati di mercato."
-
-        # Comp Set context
-        sezione_comp = ""
-        if not df_market.empty:
-            comp_mes = df_market[df_market['stay_date'].dt.month == mes_interes]
-            if not comp_mes.empty:
-                avg_comp = comp_mes[comp_mes['is_available'] == True]['price'].mean()
-                n_soldout = comp_mes[comp_mes['is_available'] == False]['name'].nunique()
-                sezione_comp = (
-                    f"\n📊 MERCATO: prezzo medio competitor €{avg_comp:.0f}/notte per {mes_nombre}. "
-                    f"{n_soldout} competitor già sold out."
-                )
-
-        prompt_ia = f"""Sei il Cervello Strategico di un sistema professionale di Revenue Management.
+    _prompt_ia = f"""Sei il Cervello Strategico di un sistema professionale di Revenue Management.
 Oggi: {fecha_hoy.strftime('%d/%m/%Y')} | Portfolio: {txt_filtro} | Mese analizzato: {mes_nombre}
 
-{sezione_br}
+{_sezione_br}
 
 📈 DATI OTB:
 • Ricavi: €{k['rev']:,.0f} ({k['var_rev']:+.1f}% vs STLY) | RevPAR: €{revpar:,.2f} ({var_revpar:+.1f}%)
 • Notti: {k['notti']:,.0f} ({k['var_notti']:+.1f}%) | ADR: €{k['adr']:,.2f} ({k['var_adr']:+.1f}%)
 • LOS: {k['los']:.1f} notti | Lead Time: {k['lt']:.0f}gg (chiusura STLY: {k['lt_ly_final']:.0f}gg)
-• Cancellazioni: {pct_canc:.1f}% | Pickup 7gg: {pickup_7_cy} pren. ({pickup_7_cy - pickup_7_ly:+d} vs STLY){sezione_comp}
+• Cancellazioni: {pct_canc:.1f}% | Pickup 7gg: {pickup_7_cy} pren. ({pickup_7_cy - pickup_7_ly:+d} vs STLY){_sezione_comp}
 
 Genera un report STRUTTURATO con esattamente questo formato (max 300 parole totali):
 
 🟢 SCENARIO CONSERVATIVO
-Azione: [cosa fare concretamente sul channel manager / PriceLabs]
+Azione: [cosa fare concretamente sul channel manager]
 Obiettivo: [risultato atteso in termini di RevPAR, ADR o occupazione]
 
 🟡 SCENARIO MODERATO
@@ -479,18 +469,9 @@ Obiettivo: [risultato atteso]
 
 💡 DIAGNOSI (2 righe max): Motivazione principale della strategia basata sui dati OTB e di mercato.
 """
-        if st.button("✨ Genera Analisi IA"):
-            if not API_KEY:
-                st.error("⚠️ Configura GEMINI_API_KEY in .streamlit/secrets.toml")
-            else:
-                with st.spinner("Analisi in corso..."):
-                    try:
-                        risposta = model.generate_content(prompt_ia)
-                        st.markdown(risposta.text)
-                    except Exception as e:
-                        st.error(f"Errore IA: {e}")
 
-    with tab_canali:
+    with tab_revenue:
+        st.divider()
         st.subheader("📡 Analisi per Canale di Prenotazione")
         if not df_cy_otb.empty and df_cy_otb['gross_revenue'].sum() > 0:
             df_ch = df_cy_otb.groupby('channel_group').agg(
@@ -545,7 +526,7 @@ Obiettivo: [risultato atteso]
         else:
             st.info("⚠️ Nessun ricavo registrato per questo periodo, i grafici dei canali non sono disponibili.")
 
-    with tab_netto:
+    with tab_costi:
         st.subheader("💼 Netto Property Manager")
         if not df_cy_otb.empty and k['netto'] > 0:
             df_netto_apt = df_cy_otb.groupby('unit_id').agg(
@@ -564,8 +545,9 @@ Obiettivo: [risultato atteso]
         else:
             st.info("⚠️ Dati insufficienti per calcolare il Netto Property Manager in questo periodo.")
 
-    with tab_grafici:
-        st.subheader("Performance per Appartamento (Netto Real)")
+    with tab_revenue:
+        st.divider()
+        st.subheader("📈 Performance per Appartamento")
         if not df_cy_otb.empty:
             df_apt = df_cy_otb.groupby('unit_id').agg(
                 Ricavi_Lordi=('gross_revenue', 'sum'),
@@ -614,7 +596,8 @@ Obiettivo: [risultato atteso]
         else:
             st.info("⚠️ Nessuna performance registrata per gli appartamenti in questo periodo.")
 
-    with tab_curve:
+    with tab_revenue:
+        st.divider()
         st.subheader(f"🌊 Booking Curve — {mes_nombre}")
         metrica_curve = st.radio("Visualizza per:", ["Ricavi Cumulati (€)", "Prenotazioni Cumulative"], horizontal=True)
         col_metrica = 'gross_revenue' if metrica_curve == "Ricavi Cumulati (€)" else 'id'
@@ -668,7 +651,7 @@ Obiettivo: [risultato atteso]
         else:
             st.info("⚠️ Nessuna prenotazione disponibile per tracciare la curva in questo periodo.")
 
-    with tab_radar:
+    with tab_mercato:
         st.subheader("🚨 Radar di Sotto-Rendimento")
         st.markdown(f"Confronto ADR per appartamento vs media portafoglio: **{k['var_adr']:+.1f}%**")
 
@@ -726,7 +709,8 @@ Obiettivo: [risultato atteso]
         else:
             st.info("⚠️ Impossibile generare il radar: dati storici o attuali insufficienti per il confronto.")
 
-    with tab_obiettivi:
+    with tab_revenue:
+        st.divider()
         st.subheader(f"🎯 Tracker Chiusura — {mes_nombre}")
         
         rev_ly_final = df_ly_final['gross_revenue'].sum() if not df_ly_final.empty else 0
@@ -759,7 +743,8 @@ Obiettivo: [risultato atteso]
         elif pct_rev >= 85 and rev_cy_otb > 0:
             st.info("🔥 **Ultimo Sforzo!** Sei a un passo dal raggiungere il fatturato storico.")
     
-    with tab_compset:
+    with tab_mercato:
+        st.divider()
         st.subheader("🕵️‍♂️ Analisi Competitiva (Prezzi Pubblici)")
         st.markdown("Monitoraggio dei prezzi e disponibilità dei tuoi diretti concorrenti su Booking.com.")
         st.info("ℹ️ **Aggiornamento dati:** i prezzi vengono raccolti eseguendo manualmente `python etl_competitors.py` dal terminale. I dati vengono poi memorizzati nel cloud e mostrati qui (cache 1 ora).")
@@ -824,7 +809,8 @@ Obiettivo: [risultato atteso]
             with st.expander("Vedi dati grezzi"):
                 st.dataframe(df_filtered[['stay_date', 'name', 'price', 'is_available']].sort_values(['stay_date', 'name']), hide_index=True)
     
-    with tab_netto_pm:
+    with tab_costi:
+        st.divider()
         st.header("💰 Analisi Margine Netto (Netto PM)")
 
         # 1. Recuperar propiedades del usuario
@@ -931,7 +917,25 @@ Obiettivo: [risultato atteso]
             else:
                 st.info(f"Nessuna prenotazione trovata per {prop_name} nell'anno {anno}.")
 
-    with tab_prezzi:
+    with tab_strategia:
+        st.subheader("🤖 Cervello Strategico — Analisi IA")
+        if bottom_rate > 0:
+            st.success(f"🔒 **Bottom Rate attivo:** €{bottom_rate:.2f}/notte — l'IA non suggerirà mai strategie sotto questa soglia.")
+        else:
+            st.warning("⚠️ Bottom Rate non calcolato — configura i costi in 'Costi & Margini' per attivare il vincolo matematico.")
+        if st.button("✨ Genera Analisi IA"):
+            if not API_KEY:
+                st.error("⚠️ Configura GEMINI_API_KEY in .streamlit/secrets.toml")
+            else:
+                with st.spinner("Analisi in corso..."):
+                    try:
+                        risposta = model.generate_content(_prompt_ia)
+                        st.markdown(risposta.text)
+                    except Exception as e:
+                        st.error(f"Errore IA: {e}")
+
+    with tab_strategia:
+        st.divider()
         st.subheader("💡 Suggerimenti Prezzi — Human-in-the-Loop")
         st.caption("Genera suggerimenti basati sul Bottom Rate, approva o rifiuta con un clic. In Fase B il prezzo verrà inviato automaticamente al PMS.")
 
