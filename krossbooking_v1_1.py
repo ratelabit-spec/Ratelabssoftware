@@ -7,6 +7,9 @@ import datetime
 import math
 from datetime import date
 from supabase import create_client, Client
+import urllib.parse
+import re
+from apify_client import ApifyClient
 from adapter_krossbooking import load_and_clean_krossbooking
 from adapter_generic import apply_mapping, validate_mapping, FIELD_LABELS, REQUIRED_FIELDS
 from etl_costs import update_or_insert_cost
@@ -149,6 +152,68 @@ def load_portfolio_costs(user_id):
     df_fix = pd.DataFrame(res_fix.data) if res_fix.data else pd.DataFrame(columns=['amount', 'frequency', 'valid_to'])
     df_var = pd.DataFrame(res_var.data) if res_var.data else pd.DataFrame(columns=['value', 'basis', 'valid_to'])
     return df_fix, df_var
+
+
+def _run_scraper(user_id, target_date):
+    """Esegue lo scraper Apify per tutti i competitor per una data specifica."""
+    apify_token = st.secrets.get("APIFY_API_TOKEN")
+    if not apify_token:
+        st.error("⚠️ APIFY_API_TOKEN non configurato in .streamlit/secrets.toml")
+        return
+
+    res = supabase.table("competitors").select("id, name, booking_url").eq("user_id", user_id).execute()
+    if not res.data:
+        st.warning("Nessun competitor registrato. Aggiungine uno nella sezione 'Gestione Competitor'.")
+        return
+
+    checkin_str  = target_date.strftime('%Y-%m-%d')
+    checkout_str = (target_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+
+    hotel_urls, url_map = [], {}
+    for comp in res.data:
+        base_url   = comp['booking_url'].split('?')[0]
+        hotel_path = urllib.parse.urlparse(base_url).path
+        final_url  = (f"{base_url}?checkin={checkin_str}&checkout={checkout_str}"
+                      f"&group_adults=2&no_rooms=1&selected_currency=EUR")
+        hotel_urls.append({"url": final_url, "method": "GET"})
+        url_map[f"{hotel_path}_{checkin_str}"] = {"competitor_id": comp['id'], "stay_date": checkin_str}
+
+    try:
+        apify  = ApifyClient(apify_token)
+        run    = apify.actor("noraview/booking-price-scraper").call(
+            run_input={"hotelUrls": hotel_urls, "includeSoldOut": True, "useApifyProxy": True}
+        )
+        records = []
+        for item in apify.dataset(run["defaultDatasetId"]).iterate_items():
+            parsed      = urllib.parse.urlparse(item.get("url", ""))
+            params      = urllib.parse.parse_qs(parsed.query)
+            checkin_ret = params.get("checkin", [None])[0]
+            meta        = url_map.get(f"{parsed.path}_{checkin_ret}")
+            if not meta:
+                continue
+            raw   = item.get("priceAmount") or item.get("price")
+            price = 0.0
+            if raw:
+                try:
+                    nums  = re.findall(r"[-+]?\d*\.\d+|\d+", str(raw).replace(",", "."))
+                    price = float(nums[0]) if nums else 0.0
+                except Exception:
+                    pass
+            records.append({
+                "competitor_id": meta["competitor_id"],
+                "stay_date":     meta["stay_date"],
+                "price":         price,
+                "is_available":  price > 0,
+            })
+
+        if records:
+            supabase.table("comp_set_prices").upsert(records, on_conflict="competitor_id, stay_date").execute()
+            st.cache_data.clear()
+            st.success(f"✅ {len(records)} prezzi aggiornati per il {checkin_str}.")
+        else:
+            st.warning("⚠️ Nessun prezzo trovato — Booking potrebbe aver cambiato struttura.")
+    except Exception as e:
+        st.error(f"Errore scraper: {e}")
 
 
 def show_login_page():
@@ -749,6 +814,24 @@ Obiettivo: [risultato atteso]
                 )
 
     with tab_mercato:
+        with st.expander("🔄 Aggiorna Prezzi Competitor", expanded=False):
+            st.caption("Esegue lo scraper su Booking.com per tutti i competitor registrati. 1 data = 1 credito Apify per competitor.")
+            scrape_date = st.date_input(
+                "Data da analizzare",
+                value=date.today() + datetime.timedelta(days=1),
+                min_value=date.today(),
+                key="scrape_date_input"
+            )
+            n_comp = len(supabase.table("competitors").select("id").eq("user_id", USER_ID).execute().data or [])
+            if n_comp > 0:
+                st.info(f"Verranno eseguiti **{n_comp} scraping** (1 per competitor). Durata stimata: 1-3 minuti.")
+            else:
+                st.warning("Nessun competitor registrato. Aggiungili in ⚙️ Dati → Gestione Competitor.")
+            if st.button("🚀 Esegui Scraper", disabled=n_comp == 0, type="primary"):
+                with st.spinner(f"Scraping prezzi per il {scrape_date.strftime('%d/%m/%Y')} — attendere (1-3 min)..."):
+                    _run_scraper(USER_ID, scrape_date)
+
+    with tab_mercato:
         st.subheader("🚨 Radar di Sotto-Rendimento")
         st.markdown(f"Confronto ADR per appartamento vs media portafoglio: **{k['var_adr']:+.1f}%**")
 
@@ -1298,8 +1381,46 @@ Obiettivo: [risultato atteso]
                 st.warning("Inserisci il nome del PMS per salvare il mapping.")
         
         st.divider()
-        
-        # --- SEZIONE 2: INSERIMENTO COSTI (DATA ENTRY) ---
+
+        # --- SEZIONE 2: GESTIONE COMPETITOR ---
+        st.subheader("🕵️ Gestione Competitor")
+        st.caption("Aggiungi gli hotel concorrenti che vuoi monitorare. Usa l'URL della pagina su Booking.com.")
+
+        res_comp_list = supabase.table("competitors").select("id, name, booking_url") \
+            .eq("user_id", USER_ID).order("name").execute()
+
+        if res_comp_list.data:
+            for comp in res_comp_list.data:
+                ca, cb, cc = st.columns([2, 5, 1])
+                ca.markdown(f"**{comp['name']}**")
+                cb.caption(comp['booking_url'][:70] + "…" if len(comp['booking_url']) > 70 else comp['booking_url'])
+                if cc.button("🗑️", key=f"del_comp_{comp['id']}"):
+                    supabase.table("competitors").delete().eq("id", comp['id']).execute()
+                    st.rerun()
+        else:
+            st.info("Nessun competitor ancora registrato.")
+
+        with st.form("form_add_competitor"):
+            cn1, cn2 = st.columns(2)
+            new_comp_name = cn1.text_input("Nome hotel competitor", placeholder="Hotel Bellavista")
+            new_comp_url  = cn2.text_input("URL Booking.com", placeholder="https://www.booking.com/hotel/it/...")
+            if st.form_submit_button("➕ Aggiungi Competitor"):
+                if not new_comp_name or not new_comp_url:
+                    st.error("Inserisci sia il nome che l'URL.")
+                elif "booking.com" not in new_comp_url:
+                    st.error("L'URL deve essere una pagina Booking.com.")
+                else:
+                    supabase.table("competitors").insert({
+                        "user_id": USER_ID,
+                        "name": new_comp_name,
+                        "booking_url": new_comp_url
+                    }).execute()
+                    st.success(f"✅ '{new_comp_name}' aggiunto!")
+                    st.rerun()
+
+        st.divider()
+
+        # --- SEZIONE 3: INSERIMENTO COSTI (DATA ENTRY) ---
         st.subheader("📝 Inserimento e Aggiornamento Costi")
         st.write("Gestisci i costi fissi e variabili per calcolare il Netto PM.")
         
