@@ -1188,8 +1188,8 @@ Obiettivo: [risultato atteso]
                     "nights":              int(row['nights']),
                     "lead_time":           int(row['lead_time']),
                     "status":              str(row['status']),
-                    "channel":             str(row.get('channel', '')),
-                    "channel_group":       str(row['channel_group']),
+                    "channel":             str(row.get('channel', '') or ''),
+                    "channel_group":       str(row['channel_group']) if pd.notnull(row.get('channel_group')) else 'Altro',
                 })
 
             chunk_size = 500
