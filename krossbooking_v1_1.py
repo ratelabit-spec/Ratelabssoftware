@@ -574,20 +574,39 @@ Obiettivo: [risultato atteso]
             st.markdown("---")
             col_ch1, col_ch2 = st.columns(2)
             with col_ch1:
+                tot_ricavi_pie = df_ch['Ricavi'].sum()
                 fig_pie = px.pie(df_ch, values='Ricavi', names='channel_group',
                                  title="Quota Ricavi per Canale",
-                                 color_discrete_sequence=[C_CY, C_TEAL, C_STLY, C_WARN, C_POS])
-                fig_pie.update_traces(textposition='inside', textinfo='percent+label',
-                                      pull=[0.03]*len(df_ch))
-                fig_pie.update_layout(**_fig_layout())
+                                 hole=0.52,
+                                 color_discrete_sequence=[C_CY, C_TEAL, C_POS, C_WARN, C_STLY])
+                fig_pie.update_traces(
+                    textposition='outside',
+                    textinfo='percent+label',
+                    textfont_size=12,
+                    hovertemplate="<b>%{label}</b><br>€%{value:,.0f}<br>%{percent}<extra></extra>",
+                    pull=[0.04]*len(df_ch),
+                    marker=dict(line=dict(color='white', width=2)),
+                )
+                fig_pie.add_annotation(
+                    text=f"<b>€{tot_ricavi_pie:,.0f}</b><br><span style='font-size:11px;color:#718096'>Totale</span>",
+                    x=0.5, y=0.5, font_size=16, showarrow=False, align='center'
+                )
+                fig_pie.update_layout(**_fig_layout(
+                    showlegend=True,
+                    legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.05)
+                ))
                 st.plotly_chart(fig_pie, use_container_width=True)
             with col_ch2:
                 df_adr_sorted = df_ch.sort_values('ADR', ascending=True)
                 fig_adr = px.bar(df_adr_sorted, x='ADR', y='channel_group', orientation='h',
                                  title="ADR per Canale (€)",
                                  text=df_adr_sorted['ADR'].apply(lambda x: f"€{x:,.0f}"))
-                fig_adr.update_traces(marker_color=C_CY, textposition='outside')
-                fig_adr.update_layout(**_fig_layout(showlegend=False))
+                fig_adr.update_traces(
+                    marker_color=C_CY, textposition='outside',
+                    hovertemplate="<b>%{y}</b><br>ADR: €%{x:,.2f}<extra></extra>",
+                    marker=dict(line=dict(width=0)),
+                )
+                fig_adr.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=10, uniformtext_mode='hide'))
                 fig_adr.update_xaxes(showgrid=True, gridcolor=_GRID)
                 fig_adr.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_adr, use_container_width=True)
@@ -606,7 +625,11 @@ Obiettivo: [risultato atteso]
                                x=['Netto', 'Commissioni'], y='unit_id', orientation='h',
                                barmode='stack', title="Netto vs Commissioni per Appartamento (€)",
                                color_discrete_map={'Netto': C_POS, 'Commissioni': C_NEG})
-            fig_netto.update_layout(**_fig_layout())
+            fig_netto.update_traces(
+                hovertemplate="<b>%{y}</b><br>%{fullData.name}: €%{x:,.0f}<extra></extra>",
+                marker=dict(line=dict(width=0)),
+            )
+            fig_netto.update_layout(**_fig_layout(uniformtext_minsize=9, uniformtext_mode='hide'))
             fig_netto.update_xaxes(showgrid=True, gridcolor=_GRID)
             fig_netto.update_yaxes(showgrid=False)
             st.plotly_chart(fig_netto, use_container_width=True)
@@ -636,8 +659,12 @@ Obiettivo: [risultato atteso]
                 fig_r = px.bar(df_apt, x='Ricavi_Lordi', y='unit_id', orientation='h',
                                title="💰 Ricavi Lordi (€)",
                                text=df_apt['Ricavi_Lordi'].apply(lambda x: f"€{x:,.0f}"))
-                fig_r.update_traces(marker_color=C_CY, textposition='outside')
-                fig_r.update_layout(**_fig_layout(showlegend=False))
+                fig_r.update_traces(
+                    marker_color=C_CY, textposition='outside',
+                    marker=dict(line=dict(width=0)),
+                    hovertemplate="<b>%{y}</b><br>Ricavi: €%{x:,.0f}<extra></extra>",
+                )
+                fig_r.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=9, uniformtext_mode='hide'))
                 fig_r.update_xaxes(showgrid=True, gridcolor=_GRID)
                 fig_r.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_r, use_container_width=True)
@@ -646,8 +673,12 @@ Obiettivo: [risultato atteso]
                 fig_o = px.bar(df_apt_occ, x='Occupazione', y='unit_id', orientation='h',
                                title="🛏️ Occupazione (%)",
                                text=df_apt_occ['Occupazione'].apply(lambda x: f"{x:.1f}%"))
-                fig_o.update_traces(marker_color=C_TEAL, textposition='outside')
-                fig_o.update_layout(**_fig_layout(showlegend=False))
+                fig_o.update_traces(
+                    marker_color=C_TEAL, textposition='outside',
+                    marker=dict(line=dict(width=0)),
+                    hovertemplate="<b>%{y}</b><br>Occupazione: %{x:.1f}%<extra></extra>",
+                )
+                fig_o.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=9, uniformtext_mode='hide'))
                 fig_o.update_xaxes(showgrid=True, gridcolor=_GRID)
                 fig_o.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_o, use_container_width=True)
@@ -656,8 +687,12 @@ Obiettivo: [risultato atteso]
                 fig_revpar = px.bar(df_apt_revpar, x='Net_RevPAR_Real', y='unit_id', orientation='h',
                                     title="🏠 Net RevPAR Real (€)",
                                     text=df_apt_revpar['Net_RevPAR_Real'].apply(lambda x: f"€{x:,.1f}"))
-                fig_revpar.update_traces(marker_color=C_POS, textposition='outside')
-                fig_revpar.update_layout(**_fig_layout(showlegend=False))
+                fig_revpar.update_traces(
+                    marker_color=C_POS, textposition='outside',
+                    marker=dict(line=dict(width=0)),
+                    hovertemplate="<b>%{y}</b><br>RevPAR: €%{x:,.1f}<extra></extra>",
+                )
+                fig_revpar.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=9, uniformtext_mode='hide'))
                 fig_revpar.update_xaxes(showgrid=True, gridcolor=_GRID)
                 fig_revpar.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_revpar, use_container_width=True)
@@ -779,8 +814,13 @@ Obiettivo: [risultato atteso]
                     color='Margine%',
                     color_continuous_scale=[[0, C_NEG], [0.3, C_WARN], [1, C_POS]],
                 )
-                fig_m.update_traces(textposition='outside')
-                fig_m.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False))
+                fig_m.update_traces(
+                    textposition='outside',
+                    marker=dict(line=dict(width=0)),
+                    hovertemplate="<b>%{y}</b><br>Margine: %{x:.1f}%<extra></extra>",
+                )
+                fig_m.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False,
+                                                   uniformtext_minsize=9, uniformtext_mode='hide'))
                 fig_m.update_xaxes(showgrid=True, gridcolor=_GRID)
                 fig_m.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_m, use_container_width=True)
@@ -794,8 +834,13 @@ Obiettivo: [risultato atteso]
                     color='Netto/notte',
                     color_continuous_scale=[[0, C_NEG], [0.3, C_WARN], [1, C_POS]],
                 )
-                fig_n.update_traces(textposition='outside')
-                fig_n.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False))
+                fig_n.update_traces(
+                    textposition='outside',
+                    marker=dict(line=dict(width=0)),
+                    hovertemplate="<b>%{y}</b><br>Netto: €%{x:.2f}/notte<extra></extra>",
+                )
+                fig_n.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False,
+                                                   uniformtext_minsize=9, uniformtext_mode='hide'))
                 fig_n.update_xaxes(showgrid=True, gridcolor=_GRID)
                 fig_n.update_yaxes(showgrid=False)
                 st.plotly_chart(fig_n, use_container_width=True)
