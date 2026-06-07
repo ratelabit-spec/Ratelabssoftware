@@ -138,11 +138,18 @@ def calcola_kpi(df_otb, df_otb_ly, df_final_ly):
     k['lt'] = df_otb['lead_time'].mean() if not df_otb.empty else 0
     k['lt_ly_final'] = df_final_ly['lead_time'].mean() if not df_final_ly.empty else 0
 
-    k['netto'] = df_otb['pm_net'].sum()
-    k['commissioni'] = df_otb['commission_amount'].sum() if 'commission_amount' in df_otb.columns else 0
+    k['netto']          = df_otb['pm_net'].sum()
+    k['commissioni']    = df_otb['commission_amount'].sum() if 'commission_amount' in df_otb.columns else 0
+    k['commissioni_ly'] = df_otb_ly['commission_amount'].sum() if 'commission_amount' in df_otb_ly.columns else 0
 
     return k
 
+
+@st.cache_data(ttl=3600)
+def load_total_units(user_id):
+    """Conta le proprietà registrate — denominatore reale per RevPAR e Bottom Rate."""
+    res = supabase.table('properties').select('id').eq('user_id', user_id).execute()
+    return len(res.data) if res.data else 0
 
 @st.cache_data(ttl=3600)
 def load_portfolio_costs(user_id):
@@ -278,6 +285,17 @@ USER_ID = st.session_state.user_id
 
 st.sidebar.title("⚙️ Impostazioni")
 
+tipo_struttura = st.sidebar.selectbox(
+    "🏨 Tipo struttura:",
+    ["Property Manager (Appartamenti)", "Hotel Diretto"]
+)
+is_hotel = tipo_struttura == "Hotel Diretto"
+lbl_unita   = "Camere"       if is_hotel else "Appartamenti"
+lbl_netto   = "Netto Oper."  if is_hotel else "Netto PM"
+lbl_portf   = "Hotel"        if is_hotel else "Portafoglio"
+
+st.sidebar.markdown("---")
+
 mes_interes = st.sidebar.selectbox(
     "📅 Mese da analizzare:",
     range(1, 13), index=4,
@@ -349,20 +367,33 @@ if not df_cloud.empty:
 
     giorni_mese = fecha_hoy_pd.replace(day=1).replace(month=mes_interes)
     giorni_nel_mese = (giorni_mese + pd.offsets.MonthEnd(0)).day
-    
-    unita_cy = df_cy['unit_id'].nunique() if not df_cy.empty else 1
-    unita_ly = df_ly['unit_id'].nunique() if not df_ly.empty else 1
-    
+
+    # Denominatore reale: tutte le unità registrate, non solo quelle con prenotazioni
+    total_units_portfolio = load_total_units(USER_ID)
+    unita_cy = total_units_portfolio if total_units_portfolio > 0 else max(df_cy['unit_id'].nunique(), 1)
+    unita_ly = unita_cy  # stesso portafoglio per confronto STLY
+
     capacita_totale_cy = unita_cy * giorni_nel_mese
     capacita_totale_ly = unita_ly * giorni_nel_mese
-    
-    revpar = k['rev'] / capacita_totale_cy if capacita_totale_cy > 0 else 0
+
+    revpar    = k['rev']    / capacita_totale_cy if capacita_totale_cy > 0 else 0
     revpar_ly = k['rev_ly'] / capacita_totale_ly if capacita_totale_ly > 0 else 0
     var_revpar = (revpar / revpar_ly - 1) * 100 if revpar_ly > 0 else 0
 
-    # Calcolo percentuale di cancellazione
+    # Occupancy %
+    occupancy_cy  = (k['notti'] / capacita_totale_cy * 100) if capacita_totale_cy > 0 else 0
+    occupancy_ly  = (k['notti_ly'] / capacita_totale_ly * 100) if capacita_totale_ly > 0 else 0
+    var_occ       = occupancy_cy - occupancy_ly  # delta in punti percentuale
+
+    # Net ADR (dopo commissioni OTA)
+    net_adr       = (k['rev'] - k['commissioni']) / k['notti'] if k['notti'] > 0 else 0
+    net_adr_ly    = (k['rev_ly'] - k['commissioni_ly']) / k['notti_ly'] if k['notti_ly'] > 0 else 0
+    var_net_adr   = (net_adr / net_adr_ly - 1) * 100 if net_adr_ly > 0 else 0
+
+    # Cancellazioni: % + ricavi a rischio
     tot_res_cy = len(df_cy_otb) + len(df_cy_canc_mes)
-    pct_canc = (len(df_cy_canc_mes) / tot_res_cy * 100) if tot_res_cy > 0 else 0
+    pct_canc   = (len(df_cy_canc_mes) / tot_res_cy * 100) if tot_res_cy > 0 else 0
+    rev_at_risk = df_cy_canc_mes['gross_revenue'].sum() if not df_cy_canc_mes.empty else 0.0
 
     # =====================================================
     # CERVELLO MATEMATICO — BOTTOM RATE
@@ -407,7 +438,7 @@ if not df_cloud.empty:
     # =====================================================
     df_market = load_comp_set_data(USER_ID)
 
-    st.caption(f"📍 **{txt_filtro}** | Mese: **{mes_nombre}** | OTB al: **{fecha_hoy.strftime('%d/%m/%Y')}**")
+    st.caption(f"📍 **{txt_filtro}** | Mese: **{mes_nombre}** | OTB al: **{fecha_hoy.strftime('%d/%m/%Y')}** | {lbl_portf}: **{unita_cy} {lbl_unita}**")
 
     tab_revenue, tab_costi, tab_mercato, tab_strategia, tab_dati = st.tabs([
         "📊 Revenue", "💰 Costi & Margini", "🕵️ Mercato", "💡 Strategia", "⚙️ Dati"
@@ -415,37 +446,45 @@ if not df_cloud.empty:
 
     with tab_revenue:
         st.subheader("Riepilogo Performance")
+
+        # ── Riga 1: KPI strategici ──
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("💰 Ricavi OTB", f"€ {k['rev']:,.0f}", f"{k['var_rev']:+.1f}% vs STLY" if k['rev_ly'] > 0 else "")
-        c2.metric("🏠 RevPAR", f"€ {revpar:,.2f}", f"{var_revpar:+.1f}% vs STLY" if revpar_ly > 0 else "")
-        c3.metric("🏷️ ADR", f"€ {k['adr']:,.2f}", f"{k['var_adr']:+.1f}% vs STLY" if k['adr_ly'] > 0 else "")
-        c4.metric("🛏️ Notti", f"{k['notti']:,.0f}", f"{k['notti'] - k['notti_ly']:+.0f} vs STLY")
-        
-        # Métrica de cancelaciones restaurada y funcional
-        c5.metric("❌ Cancellazioni", f"{pct_canc:.1f}%", f"{len(df_cy_canc_mes)} prenotazioni")
+        c1.metric("💰 Ricavi OTB",   f"€{k['rev']:,.0f}",      f"{k['var_rev']:+.1f}% vs STLY"    if k['rev_ly'] > 0 else "")
+        c2.metric("🏠 RevPAR",       f"€{revpar:,.2f}",         f"{var_revpar:+.1f}% vs STLY"      if revpar_ly > 0 else "")
+        c3.metric("📊 Occupancy",    f"{occupancy_cy:.1f}%",    f"{var_occ:+.1f}pp vs STLY"        if occupancy_ly > 0 else "")
+        c4.metric("🏷️ ADR Lordo",    f"€{k['adr']:,.2f}",       f"{k['var_adr']:+.1f}% vs STLY"   if k['adr_ly'] > 0 else "")
+        c5.metric("🏷️ Net ADR",      f"€{net_adr:,.2f}",        f"{var_net_adr:+.1f}% vs STLY"    if net_adr_ly > 0 else "")
 
-        col_lt, col_los, col_diag = st.columns([1, 1, 2])
-        with col_lt:
-            st.subheader("⏱️ Lead Time")
-            st.info(f"**OTB attuale:** {k['lt']:.0f} giorni")
-            st.warning(f"**Chiusura STLY:** {k['lt_ly_final']:.0f} giorni")
-        with col_los:
-            st.subheader("🛌 L.O.S.")
-            st.info(f"**OTB attuale:** {k['los']:.1f} notti")
-            st.warning(f"**STLY OTB:** {k['los_ly']:.1f} notti")
+        # ── Riga 2: KPI operativi ──
+        d1, d2, d3, d4, d5 = st.columns(5)
+        d1.metric(f"🛏️ {lbl_unita} analizzate", f"{unita_cy}", f"{total_units_portfolio} totali" if total_units_portfolio != unita_cy else "")
+        d2.metric("🌙 Notti vendute",  f"{k['notti']:,.0f}",    f"{k['notti'] - k['notti_ly']:+.0f} vs STLY")
+        d3.metric("🛌 LOS medio",      f"{k['los']:.1f} notti", f"STLY: {k['los_ly']:.1f}")
+        d4.metric("⏱️ Lead Time",      f"{k['lt']:.0f} gg",     f"Chiusura STLY: {k['lt_ly_final']:.0f}gg")
+        d5.metric("❌ Cancellazioni",  f"{pct_canc:.1f}%",      f"€{rev_at_risk:,.0f} a rischio" if rev_at_risk > 0 else f"{len(df_cy_canc_mes)} pren.")
 
+        # ── Insight rapido ──
+        st.markdown("")
+        col_diag, col_info = st.columns([2, 1])
         with col_diag:
             st.subheader("🧠 Insight Rapido")
-            if k['los'] > (k['los_ly'] + 1):
-                st.success(f"🌟 **Mix Ottimo:** Soggiorni più lunghi (+{k['los'] - k['los_ly']:.1f} notti).")
-            elif k['var_rev'] > 0 and k['var_adr'] >= 0:
-                st.success("🏆 **Crescita Sana:** Ricavi e prezzi in aumento.")
-            elif k['var_rev'] < -10:
-                st.error("📉 **Calo Ricavi:** Sei in ritardo rispetto all'anno scorso.")
+            if occupancy_cy >= 85 and var_net_adr < 0:
+                st.warning("⚠️ **Occupancy alta, Net ADR in calo** — sei quasi pieno ma stai scontando. Alza i prezzi.")
+            elif occupancy_cy < 50 and k['var_rev'] < -10:
+                st.error("📉 **Calo ricavi e occupancy bassa** — ritardo significativo vs STLY.")
+            elif k['los'] > (k['los_ly'] + 1):
+                st.success(f"🌟 **Mix Ottimo:** Soggiorni più lunghi (+{k['los'] - k['los_ly']:.1f} notti) — meno cambi, meno costi.")
+            elif k['var_rev'] > 0 and var_net_adr >= 0:
+                st.success("🏆 **Crescita Sana:** Ricavi e Net ADR in aumento.")
             elif k['var_notti'] > 0 and k['var_adr'] < -5:
-                st.warning("⚠️ **Diluizione ADR:** Vendi di più ma a prezzo inferiore.")
+                st.warning("⚠️ **Diluizione ADR:** Vendi di più ma a prezzo inferiore — controlla il mix canale.")
             else:
                 st.info("📊 **Ritmo Stabile:** Indicatori in linea con lo storico.")
+        with col_info:
+            st.subheader("📐 Struttura")
+            st.caption(f"**Tipo:** {tipo_struttura}")
+            st.caption(f"**{lbl_unita} totali:** {total_units_portfolio}")
+            st.caption(f"**Capacità mese:** {capacita_totale_cy:,.0f} notti disponibili")
 
         st.divider()
 
@@ -614,7 +653,7 @@ Obiettivo: [risultato atteso]
             st.info("⚠️ Nessun ricavo registrato per questo periodo, i grafici dei canali non sono disponibili.")
 
     with tab_costi:
-        st.subheader("💼 Netto Property Manager")
+        st.subheader(f"💼 {lbl_netto} per {lbl_unita}")
         if not df_cy_otb.empty and k['netto'] > 0:
             df_netto_apt = df_cy_otb.groupby('unit_id').agg(
                 Lordo=('gross_revenue', 'sum'),
@@ -623,7 +662,7 @@ Obiettivo: [risultato atteso]
             ).reset_index()
             fig_netto = px.bar(df_netto_apt.sort_values('Netto', ascending=True),
                                x=['Netto', 'Commissioni'], y='unit_id', orientation='h',
-                               barmode='stack', title="Netto vs Commissioni per Appartamento (€)",
+                               barmode='stack', title=f"{lbl_netto} vs Commissioni per {lbl_unita} (€)",
                                color_discrete_map={'Netto': C_POS, 'Commissioni': C_NEG})
             fig_netto.update_traces(
                 hovertemplate="<b>%{y}</b><br>%{fullData.name}: €%{x:,.0f}<extra></extra>",
