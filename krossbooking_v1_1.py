@@ -146,6 +146,18 @@ def calcola_kpi(df_otb, df_otb_ly, df_final_ly):
 
 
 @st.cache_data(ttl=3600)
+def load_budget(user_id, year, month):
+    res = supabase.table('monthly_budget').select('*') \
+        .eq('user_id', user_id).eq('year', year).eq('month', month).execute()
+    return res.data[0] if res.data else None
+
+@st.cache_data(ttl=3600)
+def load_budget_year(user_id, year):
+    res = supabase.table('monthly_budget').select('*') \
+        .eq('user_id', user_id).eq('year', year).order('month').execute()
+    return res.data if res.data else []
+
+@st.cache_data(ttl=3600)
 def load_total_units(user_id):
     """Conta le proprietà registrate — denominatore reale per RevPAR e Bottom Rate."""
     res = supabase.table('properties').select('id').eq('user_id', user_id).execute()
@@ -975,37 +987,124 @@ Obiettivo: [risultato atteso]
 
     with tab_revenue:
         st.divider()
-        st.subheader(f"🎯 Tracker Chiusura — {mes_nombre}")
-        
-        rev_ly_final = df_ly_final['gross_revenue'].sum() if not df_ly_final.empty else 0
-        notti_ly_final = df_ly_final['nights'].sum() if not df_ly_final.empty else 0
-        
-        rev_cy_otb = k['rev']
-        notti_cy_otb = k['notti']
-        
-        pct_rev = (rev_cy_otb / rev_ly_final * 100) if rev_ly_final > 0 else 0
-        pct_notti = (notti_cy_otb / notti_ly_final * 100) if notti_ly_final > 0 else 0
+        st.subheader("📅 Segmentazione Weekday / Weekend")
+        if not df_cy_otb.empty:
+            all_days_month = pd.date_range(
+                start=pd.Timestamp(fecha_hoy_pd.year, mes_interes, 1),
+                periods=giorni_nel_mese
+            )
+            weekday_days_n = sum(1 for d in all_days_month if d.dayofweek <= 3)
+            weekend_days_n = giorni_nel_mese - weekday_days_n
 
-        col_t1, col_t2 = st.columns(2)
-        
-        with col_t1:
-            st.metric("💰 Ricavi Attuali vs Target", 
-                      f"€ {rev_cy_otb:,.0f}", 
-                      f"Target: € {rev_ly_final:,.0f} ({pct_rev:.1f}%)",
-                      delta_color="off")
-            st.progress(min(pct_rev / 100, 1.0))
+            df_seg = df_cy_otb.copy()
+            df_seg['dow'] = df_seg['check_in_date'].dt.dayofweek
+            df_seg['Segmento'] = df_seg['dow'].apply(
+                lambda d: '🏖️ Weekend (Ven-Dom)' if d >= 4 else '💼 Weekday (Lun-Gio)'
+            )
+            seg = df_seg.groupby('Segmento').agg(
+                Revenue=('gross_revenue', 'sum'),
+                Notti=('nights', 'sum'),
+                Commissioni=('commission_amount', 'sum'),
+                Prenotazioni=('id', 'count'),
+            ).reset_index()
+            cap_map = {
+                '💼 Weekday (Lun-Gio)': unita_cy * weekday_days_n,
+                '🏖️ Weekend (Ven-Dom)': unita_cy * weekend_days_n,
+            }
+            seg['Capacita']  = seg['Segmento'].map(cap_map)
+            seg['ADR']       = seg.apply(lambda r: r['Revenue'] / r['Notti'] if r['Notti'] > 0 else 0, axis=1)
+            seg['Net ADR']   = seg.apply(lambda r: (r['Revenue'] - r['Commissioni']) / r['Notti'] if r['Notti'] > 0 else 0, axis=1)
+            seg['Occupancy'] = seg.apply(lambda r: r['Notti'] / r['Capacita'] * 100 if r['Capacita'] > 0 else 0, axis=1)
+            seg['RevPAR']    = seg.apply(lambda r: r['Revenue'] / r['Capacita'] if r['Capacita'] > 0 else 0, axis=1)
 
-        with col_t2:
-            st.metric("🛏️ Notti Attuali vs Target", 
-                      f"{notti_cy_otb:,.0f}", 
-                      f"Target: {notti_ly_final:,.0f} notti ({pct_notti:.1f}%)",
-                      delta_color="off")
-            st.progress(min(pct_notti / 100, 1.0))
+            sg1, sg2, sg3, sg4 = st.columns(4)
+            for col_w, label in zip([sg1, sg2, sg3, sg4], ['ADR', 'Net ADR', 'Occupancy', 'RevPAR']):
+                wd_val = seg[seg['Segmento'].str.contains('Weekday')][label].values
+                we_val = seg[seg['Segmento'].str.contains('Weekend')][label].values
+                wd = float(wd_val[0]) if len(wd_val) > 0 else 0
+                we = float(we_val[0]) if len(we_val) > 0 else 0
+                fmt = f"{we:.1f}%" if label == 'Occupancy' else f"€{we:,.2f}"
+                delta = f"WD: €{wd:,.2f}" if label != 'Occupancy' else f"WD: {wd:.1f}%"
+                col_w.metric(f"🏖️ Weekend — {label}", fmt, delta, delta_color="off")
 
-        if pct_rev >= 100:
-            st.success("🎉 **Obiettivo Ricavi Raggiunto!** Stai superando i risultati finali dell'anno scorso.")
-        elif pct_rev >= 85 and rev_cy_otb > 0:
-            st.info("🔥 **Ultimo Sforzo!** Sei a un passo dal raggiungere il fatturato storico.")
+            fig_seg = px.bar(
+                seg, x='Segmento', y=['ADR', 'Net ADR', 'RevPAR'],
+                barmode='group', title="ADR / Net ADR / RevPAR per Segmento (€)",
+                color_discrete_map={'ADR': C_CY, 'Net ADR': C_TEAL, 'RevPAR': C_POS}
+            )
+            fig_seg.update_traces(marker=dict(line=dict(width=0)))
+            fig_seg.update_layout(**_fig_layout(uniformtext_minsize=9))
+            fig_seg.update_xaxes(showgrid=False)
+            fig_seg.update_yaxes(showgrid=True, gridcolor=_GRID)
+            st.plotly_chart(fig_seg, use_container_width=True)
+
+            if len(seg) == 2:
+                adr_gap = abs(seg[seg['Segmento'].str.contains('Weekend')]['ADR'].values[0] -
+                              seg[seg['Segmento'].str.contains('Weekday')]['ADR'].values[0])
+                occ_we = seg[seg['Segmento'].str.contains('Weekend')]['Occupancy'].values[0]
+                occ_wd = seg[seg['Segmento'].str.contains('Weekday')]['Occupancy'].values[0]
+                if adr_gap < 10 and occ_we > occ_wd + 15:
+                    st.warning(f"⚠️ Il weekend ha {occ_we-occ_wd:.0f}pp più occupancy del weekday ma solo €{adr_gap:.0f} di gap ADR — margine di aumento prezzi weekend non sfruttato.")
+                elif adr_gap > 30:
+                    st.success(f"✅ Buona differenziazione weekend/weekday: gap ADR €{adr_gap:.0f}.")
+        else:
+            st.info("Nessun dato OTB per la segmentazione.")
+
+    with tab_revenue:
+        st.divider()
+        st.subheader(f"🎯 Forecast & Budget — {mes_nombre}")
+
+        rev_stly_final  = df_ly_final['gross_revenue'].sum() if not df_ly_final.empty else 0
+        notti_stly_final = df_ly_final['nights'].sum() if not df_ly_final.empty else 0
+        rev_cy_otb      = k['rev']
+        notti_cy_otb    = k['notti']
+
+        # ── Forecast booking-curve ──
+        # % del totale STLY già a libro nello stesso punto dell'anno scorso
+        curve_pct = (k['rev_ly'] / rev_stly_final) if rev_stly_final > 0 else 1.0
+        curve_pct = max(min(curve_pct, 1.0), 0.05)   # clamp 5%-100%
+        rev_forecast = rev_cy_otb / curve_pct
+        occ_forecast = (notti_cy_otb / curve_pct) / capacita_totale_cy * 100 if capacita_totale_cy > 0 else 0
+
+        # ── Budget ──
+        anno_sel = fecha_hoy_pd.year
+        budget   = load_budget(USER_ID, anno_sel, mes_interes)
+        bud_rev  = float(budget['target_revenue'])   if budget else None
+        bud_occ  = float(budget['target_occupancy']) if budget else None
+        bud_adr  = float(budget['target_adr'])       if budget else None
+
+        # ── Metriche confronto ──
+        c1, c2, c3 = st.columns(3)
+        c1.metric("📈 Forecast Ricavi",   f"€{rev_forecast:,.0f}",
+                  f"vs Budget: €{bud_rev:,.0f} ({(rev_forecast/bud_rev-1)*100:+.1f}%)" if bud_rev else "Budget non impostato")
+        c2.metric("📊 Forecast Occupancy", f"{occ_forecast:.1f}%",
+                  f"vs Budget: {bud_occ:.1f}%" if bud_occ else "Budget non impostato")
+        c3.metric("🏷️ ADR attuale",        f"€{k['adr']:,.2f}",
+                  f"vs Budget ADR: €{bud_adr:,.2f}" if bud_adr else "Budget non impostato")
+
+        st.caption(f"Forecast basato sulla booking curve STLY: a questo punto dell'anno, lo STLY aveva il **{curve_pct*100:.0f}%** del totale già prenotato.")
+
+        # ── Progress bar vs STLY e Budget ──
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            pct_stly = (rev_cy_otb / rev_stly_final * 100) if rev_stly_final > 0 else 0
+            st.markdown(f"**OTB vs Chiusura STLY:** {pct_stly:.1f}%")
+            st.progress(min(pct_stly / 100, 1.0))
+        with col_p2:
+            if bud_rev:
+                pct_bud = rev_forecast / bud_rev * 100
+                color_label = "🟢" if pct_bud >= 95 else ("🟡" if pct_bud >= 80 else "🔴")
+                st.markdown(f"**Forecast vs Budget:** {color_label} {pct_bud:.1f}%")
+                st.progress(min(pct_bud / 100, 1.0))
+            else:
+                st.info("Imposta il budget mensile in ⚙️ Dati → Budget per vedere il confronto.")
+
+        # ── Insight ──
+        if bud_rev and rev_forecast < bud_rev * 0.85:
+            gap = bud_rev - rev_forecast
+            st.error(f"⚠️ **Gap Budget:** Il forecast indica un potenziale shortfall di **€{gap:,.0f}**. Considera azioni di yield o promozioni mirate.")
+        elif bud_rev and rev_forecast >= bud_rev:
+            st.success(f"✅ **Budget on track:** Il forecast supera il target di €{rev_forecast - bud_rev:,.0f}. Valuta di alzare i prezzi per massimizzare il margine.")
     
     with tab_mercato:
         st.divider()
@@ -1180,6 +1279,96 @@ Obiettivo: [risultato atteso]
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info(f"Nessuna prenotazione trovata per {prop_name} nell'anno {anno}.")
+
+    with tab_strategia:
+        st.subheader(f"📅 Calendario Occupancy — {mes_nombre}")
+        st.caption("Heatmap degli arrivi per giorno del mese. Aiuta a identificare date deboli dove intervenire con i prezzi.")
+
+        first_of_month = pd.Timestamp(fecha_hoy_pd.year, mes_interes, 1)
+        first_dow = first_of_month.dayofweek  # 0=Lun
+
+        # Arrivi per giorno del mese (proxy veloce per domanda)
+        if not df_cy_attive.empty:
+            arr = (df_cy_attive[df_cy_attive['check_in_date'].dt.month == mes_interes]
+                   .groupby(df_cy_attive['check_in_date'].dt.day)
+                   .agg(n_arr=('id', 'count'), rev=('gross_revenue', 'sum'))
+                   .reset_index())
+            arr.columns = ['day', 'n_arr', 'rev']
+        else:
+            arr = pd.DataFrame(columns=['day', 'n_arr', 'rev'])
+
+        # Price suggestions per il mese selezionato
+        try:
+            sug_res = supabase.table('price_suggestions').select('date_from, date_to, suggested_price, status, scenario') \
+                .eq('user_id', USER_ID).in_('status', ['pending', 'approved']).execute()
+            df_sug = pd.DataFrame(sug_res.data) if sug_res.data else pd.DataFrame()
+        except Exception:
+            df_sug = pd.DataFrame()
+
+        # Costruisco griglia calendario 7×6
+        DAYS_IT = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom']
+        n_weeks = math.ceil((giorni_nel_mese + first_dow) / 7)
+        z    = [[None]*n_weeks for _ in range(7)]
+        text = [['']*n_weeks for _ in range(7)]
+
+        for day_num in range(1, giorni_nel_mese + 1):
+            dow  = (first_dow + day_num - 1) % 7
+            week = (first_dow + day_num - 1) // 7
+            arr_row = arr[arr['day'] == day_num]
+            n = int(arr_row['n_arr'].iloc[0]) if not arr_row.empty else 0
+            occ = min(n / unita_cy * 100, 100) if unita_cy > 0 else 0
+            z[dow][week] = occ
+
+            d_ts = pd.Timestamp(fecha_hoy_pd.year, mes_interes, day_num)
+            sug_price = None
+            if not df_sug.empty:
+                mask = (pd.to_datetime(df_sug['date_from']) <= d_ts) & (pd.to_datetime(df_sug['date_to']) >= d_ts)
+                sug_match = df_sug[mask]
+                if not sug_match.empty:
+                    sug_price = sug_match.iloc[0]['suggested_price']
+                    status_icon = "✅" if sug_match.iloc[0]['status'] == 'approved' else "⏳"
+
+            cell = f"<b>{day_num}</b><br>{occ:.0f}% occ"
+            if sug_price:
+                cell += f"<br>{status_icon}€{sug_price:.0f}"
+            text[dow][week] = cell
+
+        colorscale = [[0.0, '#FEE2E2'], [0.4, '#FEF3C7'], [0.7, '#D1FAE5'], [1.0, '#059669']]
+        fig_cal = go.Figure(go.Heatmap(
+            z=z, x=[f"Sett {i+1}" for i in range(n_weeks)],
+            y=DAYS_IT, colorscale=colorscale, showscale=True,
+            zmin=0, zmax=100,
+            colorbar=dict(title='Occ%', thickness=12, len=0.8),
+            hovertemplate='%{text}<extra></extra>',
+            text=text,
+        ))
+        for day_num in range(1, giorni_nel_mese + 1):
+            dow  = (first_dow + day_num - 1) % 7
+            week = (first_dow + day_num - 1) // 7
+            arr_row = arr[arr['day'] == day_num]
+            n = int(arr_row['n_arr'].iloc[0]) if not arr_row.empty else 0
+            occ = min(n / unita_cy * 100, 100) if unita_cy > 0 else 0
+            fig_cal.add_annotation(
+                x=week, y=dow,
+                text=f"<b>{day_num}</b><br>{occ:.0f}%",
+                showarrow=False, font=dict(size=10, color='#1A202C'),
+                xref='x', yref='y'
+            )
+        fig_cal.update_layout(
+            **_fig_layout(height=340, yaxis=dict(autorange='reversed')),
+        )
+        fig_cal.update_xaxes(showgrid=False)
+        fig_cal.update_yaxes(showgrid=False)
+        st.plotly_chart(fig_cal, use_container_width=True)
+
+        days_below_50 = sum(
+            1 for d in range(1, giorni_nel_mese+1)
+            if (arr[arr['day']==d]['n_arr'].values[0] if not arr[arr['day']==d].empty else 0) / max(unita_cy,1) < 0.5
+        )
+        if days_below_50 > 0:
+            st.warning(f"⚠️ **{days_below_50} giorni** con occupancy stimata sotto il 50% — considera suggerimenti prezzi per quelle date.")
+
+        st.divider()
 
     with tab_strategia:
         st.subheader("🤖 Cervello Strategico — Analisi IA")
@@ -1504,7 +1693,55 @@ Obiettivo: [risultato atteso]
 
         st.divider()
 
-        # --- SEZIONE 3: INSERIMENTO COSTI (DATA ENTRY) ---
+        # --- SEZIONE 3: BUDGET ANNUALE ---
+        st.subheader("🎯 Budget Annuale")
+        st.caption("Imposta i target mensili di Revenue, Occupancy e ADR. Verranno usati nella sezione Forecast.")
+
+        anno_budget = st.selectbox("Anno", [fecha_hoy_pd.year, fecha_hoy_pd.year + 1], key="anno_budget_sel")
+        mese_budget = st.selectbox("Mese", range(1, 13), format_func=lambda x: MESI_IT[x-1], key="mese_budget_sel")
+
+        existing_bud = load_budget(USER_ID, anno_budget, mese_budget)
+
+        with st.form("form_budget"):
+            bc1, bc2, bc3 = st.columns(3)
+            bud_rev_in  = bc1.number_input("Target Revenue (€)", min_value=0.0, step=1000.0,
+                                            value=float(existing_bud['target_revenue']) if existing_bud else 0.0)
+            bud_occ_in  = bc2.number_input("Target Occupancy (%)", min_value=0.0, max_value=100.0, step=1.0,
+                                            value=float(existing_bud['target_occupancy']) if existing_bud else 0.0)
+            bud_adr_in  = bc3.number_input("Target ADR (€)", min_value=0.0, step=5.0,
+                                            value=float(existing_bud['target_adr']) if existing_bud else 0.0)
+            bud_note    = st.text_input("Note (opzionale)", value=existing_bud.get('notes', '') if existing_bud else "")
+
+            if st.form_submit_button("💾 Salva Budget", type="primary"):
+                try:
+                    supabase.table('monthly_budget').upsert({
+                        "user_id": USER_ID, "year": anno_budget, "month": mese_budget,
+                        "target_revenue": bud_rev_in, "target_occupancy": bud_occ_in,
+                        "target_adr": bud_adr_in, "notes": bud_note
+                    }, on_conflict="user_id,year,month").execute()
+                    st.cache_data.clear()
+                    st.success(f"✅ Budget {MESI_IT[mese_budget-1]} {anno_budget} salvato!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore: {e}")
+
+        # Tabella riepilogo anno
+        with st.expander(f"📋 Riepilogo Budget {anno_budget}", expanded=False):
+            bud_year = load_budget_year(USER_ID, anno_budget)
+            if bud_year:
+                df_bud = pd.DataFrame(bud_year)[['month', 'target_revenue', 'target_occupancy', 'target_adr']]
+                df_bud['month'] = df_bud['month'].apply(lambda m: MESI_IT[m-1])
+                df_bud.columns = ['Mese', 'Revenue (€)', 'Occupancy (%)', 'ADR (€)']
+                st.dataframe(df_bud.style.format({'Revenue (€)': '€{:,.0f}', 'Occupancy (%)': '{:.1f}%', 'ADR (€)': '€{:.0f}'}),
+                             use_container_width=True, hide_index=True)
+                tot = sum(b['target_revenue'] for b in bud_year)
+                st.metric("Totale Revenue Budget Annuo", f"€{tot:,.0f}")
+            else:
+                st.info("Nessun budget impostato per quest'anno.")
+
+        st.divider()
+
+        # --- SEZIONE 4: INSERIMENTO COSTI (DATA ENTRY) ---
         st.subheader("📝 Inserimento e Aggiornamento Costi")
         st.write("Gestisci i costi fissi e variabili per calcolare il Netto PM.")
         
