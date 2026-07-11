@@ -450,7 +450,116 @@ if not df_cloud.empty:
     # =====================================================
     df_market = load_comp_set_data(USER_ID)
 
-    st.caption(f"📍 **{txt_filtro}** | Mese: **{mes_nombre}** | OTB al: **{fecha_hoy.strftime('%d/%m/%Y')}** | {lbl_portf}: **{unita_cy} {lbl_unita}**")
+    # =====================================================
+    # PANORAMICA ANNUALE — sempre visibile all'apertura
+    # =====================================================
+    st.subheader(f"📊 Panoramica Anno {anio_actual} — YTD al {fecha_hoy.strftime('%d/%m/%Y')}")
+    st.caption(f"📍 {txt_filtro} | {total_units_portfolio} {lbl_unita}")
+
+    # --- Dati aggregati YTD (tutte le mensilità, stessa logica OTB) ---
+    dias_ytd   = (fecha_hoy_pd - pd.Timestamp(anio_actual, 1, 1)).days + 1
+    df_cy_ytd  = df_cy_attive[df_cy_attive['booking_date'] <= fecha_hoy_pd]
+    df_ly_ytd  = df_ly_attive[df_ly_attive['booking_date'] <= fecha_stly]
+
+    rev_ytd      = df_cy_ytd['gross_revenue'].sum()
+    rev_ly_ytd   = df_ly_ytd['gross_revenue'].sum()
+    notti_ytd    = df_cy_ytd['nights'].sum()
+    notti_ly_ytd = df_ly_ytd['nights'].sum()
+    comm_ytd     = df_cy_ytd['commission_amount'].sum() if 'commission_amount' in df_cy_ytd.columns else 0
+    comm_ly_ytd  = df_ly_ytd['commission_amount'].sum() if 'commission_amount' in df_ly_ytd.columns else 0
+
+    adr_ytd        = rev_ytd / notti_ytd              if notti_ytd > 0 else 0
+    adr_ly_ytd     = rev_ly_ytd / notti_ly_ytd        if notti_ly_ytd > 0 else 0
+    net_adr_ytd    = (rev_ytd - comm_ytd) / notti_ytd     if notti_ytd > 0 else 0
+    net_adr_ly_ytd = (rev_ly_ytd - comm_ly_ytd) / notti_ly_ytd if notti_ly_ytd > 0 else 0
+
+    cap_ytd        = unita_cy * dias_ytd
+    revpar_ytd     = rev_ytd    / cap_ytd if cap_ytd > 0 else 0
+    revpar_ly_ytd  = rev_ly_ytd / cap_ytd if cap_ytd > 0 else 0
+    occ_ytd        = notti_ytd    / cap_ytd * 100 if cap_ytd > 0 else 0
+    occ_ly_ytd     = notti_ly_ytd / cap_ytd * 100 if cap_ytd > 0 else 0
+
+    var_rev_ytd     = (rev_ytd / rev_ly_ytd - 1) * 100         if rev_ly_ytd > 0 else 0
+    var_revpar_ytd  = (revpar_ytd / revpar_ly_ytd - 1) * 100   if revpar_ly_ytd > 0 else 0
+    var_occ_ytd     = occ_ytd - occ_ly_ytd
+    var_adr_ytd     = (adr_ytd / adr_ly_ytd - 1) * 100         if adr_ly_ytd > 0 else 0
+    var_net_adr_ytd = (net_adr_ytd / net_adr_ly_ytd - 1) * 100 if net_adr_ly_ytd > 0 else 0
+
+    # KPI row
+    ya1, ya2, ya3, ya4, ya5 = st.columns(5)
+    ya1.metric("💰 Revenue YTD",   f"€{rev_ytd:,.0f}",      f"{var_rev_ytd:+.1f}% vs STLY"     if rev_ly_ytd > 0 else "—")
+    ya2.metric("🏠 RevPAR YTD",    f"€{revpar_ytd:,.2f}",   f"{var_revpar_ytd:+.1f}% vs STLY"  if revpar_ly_ytd > 0 else "—")
+    ya3.metric("📊 Occupancy YTD", f"{occ_ytd:.1f}%",        f"{var_occ_ytd:+.1f}pp vs STLY"    if occ_ly_ytd > 0 else "—")
+    ya4.metric("🏷️ ADR YTD",       f"€{adr_ytd:,.2f}",       f"{var_adr_ytd:+.1f}% vs STLY"    if adr_ly_ytd > 0 else "—")
+    ya5.metric("🏷️ Net ADR YTD",   f"€{net_adr_ytd:,.2f}",   f"{var_net_adr_ytd:+.1f}% vs STLY" if net_adr_ly_ytd > 0 else "—")
+
+    # --- Aggregazione mensile per grafici ---
+    _MESI_BREVI  = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic']
+    _scaffold    = pd.DataFrame({'MeseNum': range(1, 13), 'Mese': _MESI_BREVI})
+    _label_ly    = f"{anio_actual - 1} (STLY)"
+    _color_map   = {str(anio_actual): C_CY, _label_ly: C_STLY}
+    _cat_order   = {'Mese': _MESI_BREVI, 'Anno': [str(anio_actual), _label_ly]}
+
+    def _agg_men(df, anno):
+        if df.empty:
+            base = _scaffold.copy()
+            for col in ['Revenue', 'Notti', 'ADR', 'Occ%']:
+                base[col] = 0.0
+            return base
+        g = df.groupby(df['check_in_date'].dt.month).agg(
+            Revenue=('gross_revenue', 'sum'),
+            Notti=('nights', 'sum'),
+        ).reset_index()
+        g.columns = ['MeseNum', 'Revenue', 'Notti']
+        g['ADR']    = g.apply(lambda r: r['Revenue'] / r['Notti'] if r['Notti'] > 0 else 0, axis=1)
+        g['Giorni'] = g['MeseNum'].apply(lambda m: (pd.Timestamp(anno, m, 1) + pd.offsets.MonthEnd(0)).day)
+        g['Occ%']   = g.apply(lambda r: r['Notti'] / (r['Giorni'] * unita_cy) * 100 if unita_cy > 0 else 0, axis=1)
+        return _scaffold.merge(g[['MeseNum', 'Revenue', 'Notti', 'ADR', 'Occ%']], on='MeseNum', how='left').fillna(0)
+
+    _men_cy        = _agg_men(df_cy_ytd, anio_actual);      _men_cy['Anno'] = str(anio_actual)
+    _men_ly        = _agg_men(df_ly_ytd, anio_actual - 1);  _men_ly['Anno'] = _label_ly
+    _men_all       = pd.concat([_men_cy, _men_ly], ignore_index=True)
+
+    gc1, gc2, gc3 = st.columns(3)
+
+    with gc1:
+        _f1 = px.bar(_men_all, x='Mese', y='Revenue', color='Anno', barmode='group',
+                     title="Revenue per Mese (€)",
+                     color_discrete_map=_color_map, category_orders=_cat_order)
+        _f1.update_traces(marker=dict(line=dict(width=0), cornerradius=4),
+                          hovertemplate="<b>%{x}</b><br>€%{y:,.0f}<extra>%{fullData.name}</extra>")
+        _f1.update_layout(**_fig_layout(height=300, showlegend=True,
+                                        legend=dict(orientation='h', y=-0.28, x=0.5, xanchor='center', title_text='')))
+        _f1.update_xaxes(showgrid=False)
+        _f1.update_yaxes(showgrid=True, gridcolor=_GRID)
+        st.plotly_chart(_f1, use_container_width=True)
+
+    with gc2:
+        _f2 = px.bar(_men_all, x='Mese', y='Occ%', color='Anno', barmode='group',
+                     title="Occupancy % per Mese",
+                     color_discrete_map=_color_map, category_orders=_cat_order)
+        _f2.update_traces(marker=dict(line=dict(width=0), cornerradius=4),
+                          hovertemplate="<b>%{x}</b><br>%{y:.1f}%<extra>%{fullData.name}</extra>")
+        _f2.update_layout(**_fig_layout(height=300, showlegend=True,
+                                        legend=dict(orientation='h', y=-0.28, x=0.5, xanchor='center', title_text='')))
+        _f2.update_xaxes(showgrid=False)
+        _f2.update_yaxes(showgrid=True, gridcolor=_GRID, ticksuffix='%')
+        st.plotly_chart(_f2, use_container_width=True)
+
+    with gc3:
+        _f3 = px.bar(_men_all, x='Mese', y='ADR', color='Anno', barmode='group',
+                     title="ADR per Mese (€)",
+                     color_discrete_map=_color_map, category_orders=_cat_order)
+        _f3.update_traces(marker=dict(line=dict(width=0), cornerradius=4),
+                          hovertemplate="<b>%{x}</b><br>€%{y:,.2f}<extra>%{fullData.name}</extra>")
+        _f3.update_layout(**_fig_layout(height=300, showlegend=True,
+                                        legend=dict(orientation='h', y=-0.28, x=0.5, xanchor='center', title_text='')))
+        _f3.update_xaxes(showgrid=False)
+        _f3.update_yaxes(showgrid=True, gridcolor=_GRID)
+        st.plotly_chart(_f3, use_container_width=True)
+
+    st.divider()
+    st.caption(f"🔍 Analisi mensile — **{mes_nombre}** | OTB al **{fecha_hoy.strftime('%d/%m/%Y')}** | {lbl_portf}: **{unita_cy} {lbl_unita}**")
 
     tab_revenue, tab_costi, tab_mercato, tab_strategia, tab_dati = st.tabs([
         "📊 Revenue", "💰 Costi & Margini", "🕵️ Mercato", "💡 Strategia", "⚙️ Dati"
