@@ -655,7 +655,7 @@ Obiettivo: [risultato atteso]
                 fig_adr.update_traces(
                     marker_color=C_CY, textposition='outside',
                     hovertemplate="<b>%{y}</b><br>ADR: €%{x:,.2f}<extra></extra>",
-                    marker=dict(line=dict(width=0)),
+                    marker=dict(line=dict(width=0), cornerradius=6),
                 )
                 fig_adr.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=10, uniformtext_mode='hide'))
                 fig_adr.update_xaxes(showgrid=True, gridcolor=_GRID)
@@ -678,7 +678,7 @@ Obiettivo: [risultato atteso]
                                color_discrete_map={'Netto': C_POS, 'Commissioni': C_NEG})
             fig_netto.update_traces(
                 hovertemplate="<b>%{y}</b><br>%{fullData.name}: €%{x:,.0f}<extra></extra>",
-                marker=dict(line=dict(width=0)),
+                marker=dict(line=dict(width=0), cornerradius=6),
             )
             fig_netto.update_layout(**_fig_layout(uniformtext_minsize=9, uniformtext_mode='hide'))
             fig_netto.update_xaxes(showgrid=True, gridcolor=_GRID)
@@ -712,7 +712,7 @@ Obiettivo: [risultato atteso]
                                text=df_apt['Ricavi_Lordi'].apply(lambda x: f"€{x:,.0f}"))
                 fig_r.update_traces(
                     marker_color=C_CY, textposition='outside',
-                    marker=dict(line=dict(width=0)),
+                    marker=dict(line=dict(width=0), cornerradius=6),
                     hovertemplate="<b>%{y}</b><br>Ricavi: €%{x:,.0f}<extra></extra>",
                 )
                 fig_r.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=9, uniformtext_mode='hide'))
@@ -726,7 +726,7 @@ Obiettivo: [risultato atteso]
                                text=df_apt_occ['Occupazione'].apply(lambda x: f"{x:.1f}%"))
                 fig_o.update_traces(
                     marker_color=C_TEAL, textposition='outside',
-                    marker=dict(line=dict(width=0)),
+                    marker=dict(line=dict(width=0), cornerradius=6),
                     hovertemplate="<b>%{y}</b><br>Occupazione: %{x:.1f}%<extra></extra>",
                 )
                 fig_o.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=9, uniformtext_mode='hide'))
@@ -740,7 +740,7 @@ Obiettivo: [risultato atteso]
                                     text=df_apt_revpar['Net_RevPAR_Real'].apply(lambda x: f"€{x:,.1f}"))
                 fig_revpar.update_traces(
                     marker_color=C_POS, textposition='outside',
-                    marker=dict(line=dict(width=0)),
+                    marker=dict(line=dict(width=0), cornerradius=6),
                     hovertemplate="<b>%{y}</b><br>RevPAR: €%{x:,.1f}<extra></extra>",
                 )
                 fig_revpar.update_layout(**_fig_layout(showlegend=False, uniformtext_minsize=9, uniformtext_mode='hide'))
@@ -867,7 +867,7 @@ Obiettivo: [risultato atteso]
                 )
                 fig_m.update_traces(
                     textposition='outside',
-                    marker=dict(line=dict(width=0)),
+                    marker=dict(line=dict(width=0), cornerradius=6),
                     hovertemplate="<b>%{y}</b><br>Margine: %{x:.1f}%<extra></extra>",
                 )
                 fig_m.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False,
@@ -887,7 +887,7 @@ Obiettivo: [risultato atteso]
                 )
                 fig_n.update_traces(
                     textposition='outside',
-                    marker=dict(line=dict(width=0)),
+                    marker=dict(line=dict(width=0), cornerradius=6),
                     hovertemplate="<b>%{y}</b><br>Netto: €%{x:.2f}/notte<extra></extra>",
                 )
                 fig_n.update_layout(**_fig_layout(showlegend=False, coloraxis_showscale=False,
@@ -1032,7 +1032,7 @@ Obiettivo: [risultato atteso]
                 barmode='group', title="ADR / Net ADR / RevPAR per Segmento (€)",
                 color_discrete_map={'ADR': C_CY, 'Net ADR': C_TEAL, 'RevPAR': C_POS}
             )
-            fig_seg.update_traces(marker=dict(line=dict(width=0)))
+            fig_seg.update_traces(marker=dict(line=dict(width=0), cornerradius=6))
             fig_seg.update_layout(**_fig_layout(uniformtext_minsize=9))
             fig_seg.update_xaxes(showgrid=False)
             fig_seg.update_yaxes(showgrid=True, gridcolor=_GRID)
@@ -1803,3 +1803,168 @@ Obiettivo: [risultato atteso]
                             st.success(f"✅ Costo di '{motivo}' salvato con successo a partire dal {fecha_inicio}.")
                         except Exception as e:
                             st.error(f"Errore durante il salvataggio: {e}")
+
+else:
+    # =====================================================
+    # STATO VUOTO — Schermata di Onboarding
+    # =====================================================
+    st.divider()
+    _, col_ob, _ = st.columns([1, 2, 1])
+    with col_ob:
+        st.markdown("## 👋 Benvenuto in KrossBooking Pace Pro!")
+        st.info("Il database è vuoto. Carica il tuo primo file di prenotazioni per iniziare ad analizzare il portafoglio.")
+        st.markdown("---")
+
+        pms_mode_ob = st.radio(
+            "Seleziona il tuo PMS:",
+            ["KrossBooking", "Altro PMS"],
+            horizontal=True,
+            key="ob_pms_mode"
+        )
+
+        # ── Flusso KrossBooking ──
+        if pms_mode_ob == "KrossBooking":
+            file_ob = st.file_uploader(
+                "📂 Carica il file Excel esportato da KrossBooking",
+                type=['xlsx'],
+                key="ob_file_kb"
+            )
+            if file_ob:
+                if st.button("🚀 Carica e Sincronizza", type="primary", use_container_width=True):
+                    with st.spinner("Analisi e caricamento in corso..."):
+                        df_limpio, df_cancellate = load_and_clean_krossbooking(file_ob)
+                        dfs = [d for d in [df_limpio, df_cancellate] if d is not None and not d.empty]
+                        if not dfs:
+                            st.warning("⚠️ Il file non contiene dati validi.")
+                        else:
+                            try:
+                                df_total = pd.concat(dfs, ignore_index=True)
+                                df_total['pms_reservation_id'] = df_total['id'].astype(str)
+
+                                prop_map = {}
+                                for prop_name in df_total['unit_id'].dropna().unique():
+                                    res = supabase.table('properties').upsert(
+                                        {"user_id": USER_ID, "kross_unit_id": prop_name},
+                                        on_conflict='user_id, kross_unit_id'
+                                    ).execute()
+                                    prop_map[prop_name] = res.data[0]['id']
+
+                                records = []
+                                for _, row in df_total.iterrows():
+                                    records.append({
+                                        "user_id":            USER_ID,
+                                        "property_id":        prop_map.get(row['unit_id']),
+                                        "pms_reservation_id": str(row['pms_reservation_id']),
+                                        "check_in_date":      row['check_in_date'].strftime('%Y-%m-%d') if pd.notnull(row['check_in_date']) else None,
+                                        "check_out_date":     row['check_out_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('check_out_date')) else None,
+                                        "booking_date":       row['booking_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('booking_date')) else None,
+                                        "gross_revenue":      float(row['gross_revenue']),
+                                        "commission_amount":  float(row['commission_amount']),
+                                        "net_revenue":        float(row['net_revenue']),
+                                        "pm_net":             float(row['pm_net']),
+                                        "owner_net":          float(row['owner_net']),
+                                        "nights":             int(row['nights']),
+                                        "lead_time":          int(row['lead_time']),
+                                        "status":             str(row['status']),
+                                        "channel":            str(row.get('channel', '') or ''),
+                                        "channel_group":      str(row['channel_group']) if pd.notnull(row.get('channel_group')) else 'Altro',
+                                    })
+
+                                bar = st.progress(0, text="Caricamento in corso...")
+                                total_chunks = math.ceil(len(records) / 500)
+                                for i in range(total_chunks):
+                                    chunk = records[i * 500:(i + 1) * 500]
+                                    supabase.table('reservations').upsert(chunk, on_conflict='user_id, pms_reservation_id').execute()
+                                    bar.progress((i + 1) / total_chunks, text=f"Lotto {i+1}/{total_chunks}...")
+
+                                st.cache_data.clear()
+                                st.success(f"✅ {len(records)} prenotazioni caricate con successo! Ricaricamento...")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Errore durante il caricamento: {e}")
+
+        # ── Flusso Altro PMS ──
+        else:
+            pms_name_ob = st.text_input("Nome PMS (es. Mews, Opera, Beds24...)", key="ob_pms_name")
+            file_ob_gen = st.file_uploader("📂 Carica file Excel", type=['xlsx', 'xls'], key="ob_file_gen")
+
+            if file_ob_gen and pms_name_ob:
+                df_raw_ob = pd.read_excel(file_ob_gen)
+                raw_cols_ob = list(df_raw_ob.columns.astype(str))
+                opts_ob = ["(Non mappare)"] + raw_cols_ob
+
+                saved_res_ob = supabase.table('pms_mappings').select('mapping') \
+                    .eq('user_id', USER_ID).eq('pms_name', pms_name_ob).execute()
+                saved_mapping_ob = saved_res_ob.data[0]['mapping'] if saved_res_ob.data else {}
+
+                if saved_mapping_ob:
+                    st.success(f"✅ Mapping '{pms_name_ob}' trovato — precompilato.")
+                else:
+                    st.warning("Nessun mapping salvato. Configura le colonne qui sotto.")
+
+                with st.expander("🗺️ Configura Mapping Colonne", expanded=not bool(saved_mapping_ob)):
+                    new_mapping_ob = {}
+                    col_a_ob, col_b_ob = st.columns(2)
+                    for idx, (field, label) in enumerate(FIELD_LABELS.items()):
+                        container = col_a_ob if idx % 2 == 0 else col_b_ob
+                        saved_val = saved_mapping_ob.get(field, "(Non mappare)")
+                        default_idx = opts_ob.index(saved_val) if saved_val in opts_ob else 0
+                        chosen = container.selectbox(label, opts_ob, index=default_idx, key=f"ob_gmap_{field}")
+                        new_mapping_ob[field] = chosen if chosen != "(Non mappare)" else None
+
+                errors_ob = validate_mapping(new_mapping_ob)
+                for err in errors_ob:
+                    st.error(err)
+
+                if not errors_ob:
+                    if st.button("🚀 Carica & Salva Mapping", type="primary", use_container_width=True, key="ob_load_gen"):
+                        with st.spinner("Normalizzazione e caricamento..."):
+                            try:
+                                supabase.table('pms_mappings').upsert(
+                                    {"user_id": USER_ID, "pms_name": pms_name_ob, "mapping": new_mapping_ob},
+                                    on_conflict="user_id,pms_name"
+                                ).execute()
+                                df_norm_ob = apply_mapping(df_raw_ob, new_mapping_ob)
+                                if df_norm_ob.empty:
+                                    st.warning("Nessuna prenotazione valida trovata. Verifica il mapping.")
+                                else:
+                                    prop_map_ob = {}
+                                    for prop_name in df_norm_ob['unit_id'].dropna().unique():
+                                        res = supabase.table('properties').upsert(
+                                            {"user_id": USER_ID, "kross_unit_id": prop_name},
+                                            on_conflict='user_id, kross_unit_id'
+                                        ).execute()
+                                        prop_map_ob[prop_name] = res.data[0]['id']
+
+                                    records_ob = []
+                                    for _, row in df_norm_ob.iterrows():
+                                        records_ob.append({
+                                            "user_id":            USER_ID,
+                                            "property_id":        prop_map_ob.get(row['unit_id']),
+                                            "pms_reservation_id": str(row['pms_reservation_id']),
+                                            "check_in_date":      row['check_in_date'].strftime('%Y-%m-%d') if pd.notnull(row['check_in_date']) else None,
+                                            "check_out_date":     row['check_out_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('check_out_date')) else None,
+                                            "booking_date":       row['booking_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('booking_date')) else None,
+                                            "gross_revenue":      float(row['gross_revenue']),
+                                            "commission_amount":  float(row['commission_amount']),
+                                            "net_revenue":        float(row['net_revenue']),
+                                            "pm_net":             float(row['pm_net']),
+                                            "owner_net":          float(row['owner_net']),
+                                            "nights":             int(row['nights']),
+                                            "lead_time":          int(row['lead_time']),
+                                            "status":             str(row['status']),
+                                            "channel":            str(row.get('channel', '') or ''),
+                                            "channel_group":      str(row.get('channel_group', 'Altro') or 'Altro'),
+                                        })
+
+                                    for i in range(math.ceil(len(records_ob) / 500)):
+                                        chunk = records_ob[i * 500:(i + 1) * 500]
+                                        supabase.table('reservations').upsert(chunk, on_conflict='user_id, pms_reservation_id').execute()
+
+                                    st.cache_data.clear()
+                                    st.success(f"✅ {len(records_ob)} prenotazioni caricate da '{pms_name_ob}'!")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Errore: {e}")
+            elif file_ob_gen and not pms_name_ob:
+                st.warning("Inserisci il nome del PMS per continuare.")
