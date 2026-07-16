@@ -16,7 +16,7 @@ from etl_costs import update_or_insert_cost
 from etl_metrics import calculate_property_margins
 
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(page_title="KrossBooking Pace Pro", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Rate Labs RMS", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -381,7 +381,7 @@ def _run_scraper(user_id, target_date):
 def show_login_page():
     _, col, _ = st.columns([1, 2, 1])
     with col:
-        st.markdown("# 📈 KrossBooking Pace Pro")
+        st.markdown("# 📊 Rate Labs RMS")
         st.markdown("### Accesso")
         email = st.text_input("Email", placeholder="nome@email.com")
         password = st.text_input("Password", type="password")
@@ -472,7 +472,7 @@ if st.sidebar.button("🚪 Esci", use_container_width=True):
 # MAIN
 # =====================================================
 
-st.title("📊 KrossBooking Pace Pro — Cloud V3.0")
+st.title("📊 Rate Labs RMS")
 
 with st.spinner('Sincronizzazione con il database in corso...'):
     df_cloud = load_data_from_supabase(USER_ID)
@@ -2063,7 +2063,7 @@ else:
     st.divider()
     _, col_ob, _ = st.columns([1, 2, 1])
     with col_ob:
-        st.markdown("## 👋 Benvenuto in KrossBooking Pace Pro!")
+        st.markdown("## 👋 Benvenuto in Rate Labs RMS!")
         st.info("Il database è vuoto. Carica il tuo primo file di prenotazioni per iniziare ad analizzare il portafoglio.")
         st.markdown("---")
 
