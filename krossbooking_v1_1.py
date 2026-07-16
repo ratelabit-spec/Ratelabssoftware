@@ -18,6 +18,149 @@ from etl_metrics import calculate_property_margins
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="KrossBooking Pace Pro", page_icon="📈", layout="wide")
 
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+/* ── GLOBAL ── */
+html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
+
+/* ── SFONDO PRINCIPALE ── */
+.main { background: #F1F5F9 !important; }
+.block-container { padding-top: 1.8rem !important; }
+
+/* ── SIDEBAR NAVY SCURO ── */
+[data-testid="stSidebar"] {
+    background: #1C2438 !important;
+    border-right: 1px solid #2A3450;
+}
+[data-testid="stSidebar"] .stMarkdown p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] small { color: #CBD5E1 !important; }
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 { color: #FFFFFF !important; }
+[data-testid="stSidebar"] hr { border-color: #2D3A52 !important; }
+[data-testid="stSidebar"] .stButton > button {
+    background: #2D3A52 !important;
+    color: #E2E8F0 !important;
+    border: 1px solid #3D4F6E !important;
+    border-radius: 8px !important;
+}
+[data-testid="stSidebar"] .stSelectbox > div > div,
+[data-testid="stSidebar"] .stDateInput input,
+[data-testid="stSidebar"] .stMultiSelect > div > div {
+    background: #243049 !important;
+    border-color: #3D4F6E !important;
+    color: #E2E8F0 !important;
+    border-radius: 8px !important;
+}
+
+/* ── METRIC CARDS ── */
+[data-testid="stMetric"] {
+    background: #FFFFFF !important;
+    border-radius: 14px !important;
+    padding: 1.1rem 1.25rem !important;
+    border: 1px solid #E2E8F0 !important;
+    box-shadow: 0 2px 8px rgba(15,23,42,0.06), 0 0 0 1px rgba(15,23,42,0.03) !important;
+}
+[data-testid="stMetricLabel"] > div {
+    font-size: 0.7rem !important;
+    font-weight: 600 !important;
+    color: #64748B !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.07em !important;
+}
+[data-testid="stMetricValue"] > div {
+    font-size: 1.65rem !important;
+    font-weight: 700 !important;
+    color: #0F172A !important;
+    line-height: 1.15 !important;
+}
+[data-testid="stMetricDelta"] svg { display: none !important; }
+[data-testid="stMetricDelta"] > div {
+    font-size: 0.77rem !important;
+    font-weight: 500 !important;
+}
+
+/* ── TAB — pill style ── */
+.stTabs [data-baseweb="tab-list"] {
+    background: #FFFFFF;
+    border-radius: 12px;
+    padding: 5px;
+    gap: 3px;
+    border: 1px solid #E2E8F0;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px !important;
+    padding: 8px 18px !important;
+    font-weight: 500 !important;
+    font-size: 0.83rem !important;
+    color: #64748B !important;
+    background: transparent !important;
+}
+.stTabs [data-baseweb="tab"]:hover { background: #F1F5F9 !important; color: #1E293B !important; }
+.stTabs [aria-selected="true"][data-baseweb="tab"] {
+    background: #1E6FD9 !important;
+    color: #FFFFFF !important;
+    font-weight: 600 !important;
+    box-shadow: 0 2px 8px rgba(30,111,217,0.3);
+}
+.stTabs [data-baseweb="tab-highlight"],
+.stTabs [data-baseweb="tab-border"] { display: none !important; }
+
+/* ── BUTTONS ── */
+.stButton > button {
+    border-radius: 9px !important;
+    font-weight: 500 !important;
+    font-size: 0.875rem !important;
+    transition: all 0.18s ease !important;
+}
+.stButton > button[kind="primary"] {
+    background: #1E6FD9 !important;
+    border: none !important;
+    box-shadow: 0 2px 8px rgba(30,111,217,0.35) !important;
+}
+.stButton > button[kind="primary"]:hover {
+    background: #1558B0 !important;
+    box-shadow: 0 4px 14px rgba(30,111,217,0.45) !important;
+    transform: translateY(-1px);
+}
+.stButton > button:not([kind="primary"]) { border: 1px solid #E2E8F0 !important; }
+
+/* ── ALERTS ── */
+[data-testid="stAlert"] { border-radius: 10px !important; border-left-width: 4px !important; }
+
+/* ── DATAFRAME ── */
+[data-testid="stDataFrame"] { border-radius: 10px !important; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+
+/* ── EXPANDER ── */
+details summary {
+    background: #FFFFFF !important;
+    border-radius: 10px !important;
+    border: 1px solid #E2E8F0 !important;
+    font-weight: 500 !important;
+    padding: 0.7rem 1rem !important;
+}
+
+/* ── FORM / INPUT ── */
+.stTextInput input, .stNumberInput input, .stTextArea textarea, .stSelectbox > div > div {
+    border-radius: 8px !important;
+    border-color: #E2E8F0 !important;
+}
+.stForm { background: #FFFFFF; border-radius: 14px; padding: 1.2rem; border: 1px solid #E2E8F0; }
+
+/* ── TYPOGRAPHY ── */
+h1 { font-weight: 700 !important; color: #0F172A !important; letter-spacing: -0.02em !important; }
+h2 { font-weight: 600 !important; color: #1E293B !important; letter-spacing: -0.01em !important; }
+h3 { font-weight: 600 !important; color: #334155 !important; }
+hr { border-color: #E2E8F0 !important; margin: 1.5rem 0 !important; }
+[data-testid="stCaptionContainer"] p { color: #64748B !important; font-size: 0.78rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
 # --- CONNESSIONE SUPABASE & API KEY ---
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
