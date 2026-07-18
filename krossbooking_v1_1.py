@@ -158,6 +158,48 @@ h2 { font-weight: 600 !important; color: #1E293B !important; letter-spacing: -0.
 h3 { font-weight: 600 !important; color: #334155 !important; }
 hr { border-color: #E2E8F0 !important; margin: 1.5rem 0 !important; }
 [data-testid="stCaptionContainer"] p { color: #64748B !important; font-size: 0.78rem !important; }
+
+/* ── RL-TABLE (tabelle HTML custom) ── */
+.rl-table-wrap {
+    background: #FFFFFF;
+    border-radius: 12px;
+    border: 1px solid #E2E8F0;
+    box-shadow: 0 2px 8px rgba(15,23,42,0.06);
+    overflow: hidden;
+    margin: 0.5rem 0 1rem 0;
+}
+.rl-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.84rem;
+    color: #1E293B;
+}
+.rl-table thead tr { background: #1C2438; }
+.rl-table thead th {
+    padding: 10px 16px;
+    font-weight: 600;
+    font-size: 0.69rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #94A3B8;
+    text-align: left;
+    white-space: nowrap;
+}
+.rl-table thead th.rnum { text-align: right; }
+.rl-table tbody tr:nth-child(even) { background: #F8FAFC; }
+.rl-table tbody tr:hover { background: #EFF6FF; transition: background 0.12s; }
+.rl-table tbody td {
+    padding: 9px 16px;
+    border-bottom: 1px solid #F1F5F9;
+    font-size: 0.84rem;
+}
+.rl-table tbody tr:last-child td { border-bottom: none; }
+.rl-table td.rnum { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
+.rl-table td.pos { color: #16A34A !important; font-weight: 700; }
+.rl-table td.neg { color: #DC2626 !important; font-weight: 700; }
+.rl-table td.neu { color: #94A3B8 !important; font-weight: 600; }
+.rl-table td.warn { color: #D97706 !important; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -396,6 +438,54 @@ def show_login_page():
                 st.rerun()
             except Exception:
                 st.error("❌ Credenziali non valide. Controlla email e password.")
+
+
+def _html_table(df: pd.DataFrame, num_cols=None, delta_cols=None,
+                fmt=None, color_fn=None) -> str:
+    """Renders a DataFrame as a styled HTML table (Rate Labs RMS style)."""
+    num_cols   = set(num_cols or [])
+    delta_cols = set(delta_cols or [])
+    fmt        = fmt or {}
+    color_fn   = color_fn or {}
+
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            num_cols.add(col)
+
+    headers = "".join(
+        f'<th class="rnum">{col}</th>' if col in num_cols else f'<th>{col}</th>'
+        for col in df.columns
+    )
+
+    rows = ""
+    for _, row in df.iterrows():
+        cells = ""
+        for col in df.columns:
+            val = row[col]
+            if col in fmt:
+                try:
+                    display = fmt[col].format(val)
+                except Exception:
+                    display = str(val)
+            else:
+                display = "—" if (isinstance(val, float) and pd.isna(val)) else str(val)
+
+            parts = ["rnum"] if col in num_cols else []
+            if col in delta_cols and isinstance(val, (int, float)):
+                parts.append("pos" if val > 0 else ("neg" if val < 0 else "neu"))
+            elif col in color_fn:
+                parts.append(color_fn[col](val))
+
+            cells += f'<td class="{" ".join(parts)}">{display}</td>'
+        rows += f"<tr>{cells}</tr>"
+
+    return (
+        '<div class="rl-table-wrap">'
+        '<table class="rl-table">'
+        f'<thead><tr>{headers}</tr></thead>'
+        f'<tbody>{rows}</tbody>'
+        '</table></div>'
+    )
 
 
 def calcola_pickup(df_cy, df_ly, mes, data_oggi, data_stly, finestre=(7, 14, 30)):
@@ -759,21 +849,17 @@ if not df_cloud.empty:
         if not df_pickup.empty:
             col_pu_left, col_pu_right = st.columns([3, 2])
             with col_pu_left:
-                def stile_delta(val):
-                    if isinstance(val, (int, float)):
-                        color = "#38A169" if val > 0 else ("#E53E3E" if val < 0 else "#718096")
-                        return f"color: {color}; font-weight: bold"
-                    return ""
-
-                styled = df_pickup.style\
-                    .format({
+                st.markdown(_html_table(
+                    df_pickup,
+                    num_cols=['Pren. CY', 'Pren. STLY', 'Δ Pren.', 'Rev. CY (€)', 'Rev. STLY (€)', 'Δ Rev. (€)'],
+                    delta_cols=['Δ Pren.', 'Δ Rev. (€)'],
+                    fmt={
                         'Rev. CY (€)':   '€ {:,.0f}',
                         'Rev. STLY (€)': '€ {:,.0f}',
                         'Δ Rev. (€)':    '€ {:+,.0f}',
                         'Δ Pren.':       '{:+d}',
-                    })\
-                    .map(stile_delta, subset=['Δ Pren.', 'Δ Rev. (€)'])
-                st.dataframe(styled, use_container_width=True, hide_index=True)
+                    }
+                ), unsafe_allow_html=True)
 
             with col_pu_right:
                 pickup_7_delta  = pickup_7_cy - pickup_7_ly
@@ -864,15 +950,15 @@ Obiettivo: [risultato atteso]
             df_ch_display = df_ch[['channel_group', 'Ricavi', '% Ricavi', 'Commissioni', '% Commissione Media', 'Prenotazioni']].copy()
             df_ch_display = df_ch_display.sort_values('Ricavi', ascending=False)
             
-            st.dataframe(
-                df_ch_display.style.format({
-                    'Ricavi': '€ {:,.2f}',
-                    '% Ricavi': '{:.1f} %',
-                    'Commissioni': '€ {:,.2f}',
-                    '% Commissione Media': '{:.1f} %'
-                }),
-                hide_index=True, use_container_width=True
-            )
+            st.markdown(_html_table(
+                df_ch_display,
+                fmt={
+                    'Ricavi':               '€ {:,.0f}',
+                    '% Ricavi':             '{:.1f}%',
+                    'Commissioni':          '€ {:,.0f}',
+                    '% Commissione Media':  '{:.1f}%',
+                }
+            ), unsafe_allow_html=True)
 
             st.markdown("---")
             col_ch1, col_ch2 = st.columns(2)
@@ -1088,22 +1174,19 @@ Obiettivo: [risultato atteso]
             cols_show = ['channel_group', 'ADR', 'Comm%', 'Comm/notte', 'Var/notte', 'Fissi/notte', 'Costo totale', 'Netto/notte', 'Margine%']
             df_display = df_ota[cols_show].sort_values('Margine%', ascending=False).rename(columns={'channel_group': 'Canale'})
 
-            def _color_margin(val):
-                if not isinstance(val, (int, float)):
-                    return ''
-                if val >= 30: return f'color: {C_POS}; font-weight:bold'
-                if val >= 10: return f'color: {C_WARN}; font-weight:bold'
-                return f'color: {C_NEG}; font-weight:bold'
-
-            fmt = {
+            fmt_cost = {
                 'ADR': '€{:.2f}', 'Comm/notte': '€{:.2f}', 'Var/notte': '€{:.2f}',
                 'Fissi/notte': '€{:.2f}', 'Costo totale': '€{:.2f}', 'Netto/notte': '€{:.2f}',
                 'Comm%': '{:.1f}%', 'Margine%': '{:.1f}%'
             }
-            st.dataframe(
-                df_display.style.format(fmt).map(_color_margin, subset=['Margine%']),
-                use_container_width=True, hide_index=True
-            )
+            st.markdown(_html_table(
+                df_display,
+                fmt=fmt_cost,
+                color_fn={
+                    'Margine%':   lambda v: 'pos' if v >= 30 else ('warn' if v >= 10 else 'neg'),
+                    'Netto/notte': lambda v: 'pos' if v > 0 else 'neg',
+                }
+            ), unsafe_allow_html=True)
 
             st.markdown("##### 📈 Margine Netto per Canale (€/notte)")
             col_l, col_r = st.columns(2)
@@ -1984,8 +2067,10 @@ Obiettivo: [risultato atteso]
                 df_bud = pd.DataFrame(bud_year)[['month', 'target_revenue', 'target_occupancy', 'target_adr']]
                 df_bud['month'] = df_bud['month'].apply(lambda m: MESI_IT[m-1])
                 df_bud.columns = ['Mese', 'Revenue (€)', 'Occupancy (%)', 'ADR (€)']
-                st.dataframe(df_bud.style.format({'Revenue (€)': '€{:,.0f}', 'Occupancy (%)': '{:.1f}%', 'ADR (€)': '€{:.0f}'}),
-                             use_container_width=True, hide_index=True)
+                st.markdown(_html_table(
+                    df_bud,
+                    fmt={'Revenue (€)': '€{:,.0f}', 'Occupancy (%)': '{:.1f}%', 'ADR (€)': '€{:.0f}'}
+                ), unsafe_allow_html=True)
                 tot = sum(b['target_revenue'] for b in bud_year)
                 st.metric("Totale Revenue Budget Annuo", f"€{tot:,.0f}")
             else:
