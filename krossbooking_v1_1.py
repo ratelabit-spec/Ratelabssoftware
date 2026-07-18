@@ -80,8 +80,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 }
 [data-testid="stMetricDelta"] svg { display: none !important; }
 [data-testid="stMetricDelta"] > div {
-    font-size: 0.77rem !important;
-    font-weight: 500 !important;
+    font-size: 0.82rem !important;
+    font-weight: 700 !important;
 }
 
 /* ── TAB — pill style ── */
@@ -440,6 +440,42 @@ def show_login_page():
                 st.error("❌ Credenziali non valide. Controlla email e password.")
 
 
+def calcola_pace(df_cy_attive, df_ly_attive, mes, anio_cy, fecha_hoy_pd, fecha_stly, max_days=120):
+    """Curva di riempimento cumulativa (Revenue) per il mese selezionato, CY vs STLY."""
+    mes_start_cy = pd.Timestamp(anio_cy, mes, 1)
+    mes_start_ly = pd.Timestamp(anio_cy - 1, mes, 1)
+
+    def _prep(df, mes_start, cutoff=None):
+        sub = df[df['check_in_date'].dt.month == mes].copy()
+        sub = sub[sub['booking_date'].notna()]
+        if cutoff is not None:
+            sub = sub[sub['booking_date'] <= cutoff]
+        sub['days_out'] = (mes_start - pd.to_datetime(sub['booking_date'])).dt.days
+        return sub
+
+    def _curve(df_sub):
+        if df_sub.empty:
+            return pd.DataFrame(columns=['days_out', 'cum_rev', 'cum_pren'])
+        agg = df_sub.groupby('days_out').agg(
+            rev=('gross_revenue', 'sum'),
+            pren=('gross_revenue', 'count')
+        ).reset_index()
+        rng = pd.DataFrame({'days_out': range(max_days, -61, -1)})
+        agg = rng.merge(agg, on='days_out', how='left').fillna(0)
+        agg = agg.sort_values('days_out', ascending=False)
+        agg['cum_rev']  = agg['rev'].cumsum()
+        agg['cum_pren'] = agg['pren'].cumsum()
+        return agg[['days_out', 'cum_rev', 'cum_pren']].sort_values('days_out', ascending=True)
+
+    days_out_oggi = int((mes_start_cy - fecha_hoy_pd).days)
+    return (
+        _curve(_prep(df_cy_attive, mes_start_cy, fecha_hoy_pd)),
+        _curve(_prep(df_ly_attive, mes_start_ly, fecha_stly)),
+        _curve(_prep(df_ly_attive, mes_start_ly)),
+        days_out_oggi,
+    )
+
+
 def _html_table(df: pd.DataFrame, num_cols=None, delta_cols=None,
                 fmt=None, color_fn=None) -> str:
     """Renders a DataFrame as a styled HTML table (Rate Labs RMS style)."""
@@ -753,6 +789,30 @@ if not df_cloud.empty:
     _men_ly        = _agg_men(df_ly_ytd, anio_actual - 1);  _men_ly['Anno'] = _label_ly
     _men_all       = pd.concat([_men_cy, _men_ly], ignore_index=True)
 
+    # --- Semaforo mensile (Rev CY vs STLY per mese) ---
+    _sema_html = '<div style="display:flex;gap:5px;flex-wrap:wrap;margin:0.75rem 0 0.5rem;">'
+    for _si in range(12):
+        _m = _si + 1
+        _cv = float(_men_cy[_men_cy['MeseNum'] == _m]['Revenue'].values[0]) if len(_men_cy[_men_cy['MeseNum'] == _m]) > 0 else 0
+        _lv = float(_men_ly[_men_ly['MeseNum'] == _m]['Revenue'].values[0]) if len(_men_ly[_men_ly['MeseNum'] == _m]) > 0 else 0
+        if _cv == 0 and _m > fecha_hoy_pd.month:
+            _bg, _col, _ico = '#F1F5F9', '#94A3B8', '○'
+        elif _lv == 0:
+            _bg, _col, _ico = '#EFF6FF', '#3B82F6', '·'
+        else:
+            _pct_s = (_cv / _lv - 1) * 100
+            if _pct_s >= 5:   _bg, _col, _ico = '#DCFCE7', '#16A34A', '↑'
+            elif _pct_s >= -5: _bg, _col, _ico = '#FEF3C7', '#D97706', '→'
+            else:              _bg, _col, _ico = '#FEE2E2', '#DC2626', '↓'
+        _brd = 'border:2px solid #1E6FD9;' if _m == mes_interes else 'border:1px solid transparent;'
+        _sema_html += (
+            f'<div style="background:{_bg};color:{_col};border-radius:8px;padding:4px 10px;'
+            f'font-size:0.73rem;font-weight:600;{_brd}display:inline-flex;align-items:center;gap:3px;">'
+            f'<span>{_ico}</span><span>{_MESI_BREVI[_si]}</span></div>'
+        )
+    _sema_html += '</div>'
+    st.markdown(_sema_html, unsafe_allow_html=True)
+
     gc1, gc2, gc3 = st.columns(3)
 
     with gc1:
@@ -765,6 +825,9 @@ if not df_cloud.empty:
                                         legend=dict(orientation='h', y=-0.28, x=0.5, xanchor='center', title_text='')))
         _f1.update_xaxes(showgrid=False)
         _f1.update_yaxes(showgrid=True, gridcolor=_GRID)
+        _f1.add_shape(type='rect', xref='x', yref='paper',
+                      x0=mes_interes-1-0.46, x1=mes_interes-1+0.46, y0=0, y1=1,
+                      fillcolor='rgba(30,111,217,0.07)', line_width=0, layer='below')
         st.plotly_chart(_f1, use_container_width=True)
 
     with gc2:
@@ -777,6 +840,9 @@ if not df_cloud.empty:
                                         legend=dict(orientation='h', y=-0.28, x=0.5, xanchor='center', title_text='')))
         _f2.update_xaxes(showgrid=False)
         _f2.update_yaxes(showgrid=True, gridcolor=_GRID, ticksuffix='%')
+        _f2.add_shape(type='rect', xref='x', yref='paper',
+                      x0=mes_interes-1-0.46, x1=mes_interes-1+0.46, y0=0, y1=1,
+                      fillcolor='rgba(30,111,217,0.07)', line_width=0, layer='below')
         st.plotly_chart(_f2, use_container_width=True)
 
     with gc3:
@@ -789,6 +855,9 @@ if not df_cloud.empty:
                                         legend=dict(orientation='h', y=-0.28, x=0.5, xanchor='center', title_text='')))
         _f3.update_xaxes(showgrid=False)
         _f3.update_yaxes(showgrid=True, gridcolor=_GRID)
+        _f3.add_shape(type='rect', xref='x', yref='paper',
+                      x0=mes_interes-1-0.46, x1=mes_interes-1+0.46, y0=0, y1=1,
+                      fillcolor='rgba(30,111,217,0.07)', line_width=0, layer='below')
         st.plotly_chart(_f3, use_container_width=True)
 
     st.divider()
@@ -800,6 +869,28 @@ if not df_cloud.empty:
 
     with tab_revenue:
         st.subheader("Riepilogo Performance")
+
+        # ── Status header ──
+        if k['rev_ly'] > 0:
+            _drev = k['var_rev']
+            if _drev >= 5:
+                _sh_bg, _sh_col, _sh_ico = '#DCFCE7', '#15803D', '📈'
+                _sh_txt = f"+{_drev:.1f}% vs STLY — Sopra ritmo"
+            elif _drev <= -5:
+                _sh_bg, _sh_col, _sh_ico = '#FEE2E2', '#DC2626', '📉'
+                _sh_txt = f"{_drev:.1f}% vs STLY — Sotto ritmo"
+            else:
+                _sh_bg, _sh_col, _sh_ico = '#FEF3C7', '#D97706', '↔️'
+                _sh_txt = f"{_drev:+.1f}% vs STLY — In linea"
+            if occupancy_cy >= 80:
+                _sh_txt += f"  ·  Occ. {occupancy_cy:.0f}% — Alto riempimento"
+            st.markdown(
+                f'<div style="background:{_sh_bg};color:{_sh_col};border-radius:10px;'
+                f'padding:0.55rem 1.1rem;font-weight:600;font-size:0.88rem;margin-bottom:0.6rem;'
+                f'border:1px solid {_sh_col}33;">'
+                f'{_sh_ico}&nbsp;&nbsp;<b>{mes_nombre}</b> — {_sh_txt}</div>',
+                unsafe_allow_html=True
+            )
 
         # ── Riga 1: KPI strategici ──
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -876,6 +967,84 @@ if not df_cloud.empty:
                 )
         else:
             st.info("Nessun dato disponibile per il Pickup Report.")
+
+        # =====================================================
+        # BOOKING PACE CURVE
+        # =====================================================
+        st.divider()
+        st.subheader("📈 Booking Pace — Curva di Riempimento")
+        st.caption(f"Revenue cumulativo prenotato per {mes_nombre} — giorni prima dell'inizio del mese")
+
+        _pace_cy, _pace_ly, _pace_ly_fin, _days_oggi = calcola_pace(
+            df_cy_attive, df_ly_attive, mes_interes, anio_actual, fecha_hoy_pd, fecha_stly
+        )
+
+        if not _pace_cy.empty or not _pace_ly.empty:
+            _pcol1, _pcol2 = st.columns([4, 1])
+            with _pcol1:
+                _fig_p = go.Figure()
+
+                if not _pace_ly_fin.empty:
+                    _fig_p.add_trace(go.Scatter(
+                        x=_pace_ly_fin['days_out'], y=_pace_ly_fin['cum_rev'],
+                        mode='lines', name=f"{anio_actual - 1} (finale)",
+                        line=dict(color=C_STLY, width=1.5, dash='dot'),
+                        opacity=0.5,
+                        hovertemplate=f"<b>{anio_actual-1} Finale</b><br>%{{x}} gg | €%{{y:,.0f}}<extra></extra>",
+                    ))
+                if not _pace_ly.empty:
+                    _fig_p.add_trace(go.Scatter(
+                        x=_pace_ly['days_out'], y=_pace_ly['cum_rev'],
+                        mode='lines', name=f"{anio_actual - 1} (stesso OTB)",
+                        line=dict(color=C_STLY, width=2),
+                        hovertemplate=f"<b>{anio_actual-1} OTB</b><br>%{{x}} gg | €%{{y:,.0f}}<extra></extra>",
+                    ))
+                if not _pace_cy.empty:
+                    _fig_p.add_trace(go.Scatter(
+                        x=_pace_cy['days_out'], y=_pace_cy['cum_rev'],
+                        mode='lines', name=f"{anio_actual} (OTB)",
+                        line=dict(color=C_CY, width=2.5),
+                        hovertemplate=f"<b>{anio_actual} OTB</b><br>%{{x}} gg | €%{{y:,.0f}}<extra></extra>",
+                    ))
+
+                _fig_p.add_vline(
+                    x=_days_oggi,
+                    line_dash='dash', line_color='rgba(30,111,217,0.55)', line_width=1.5,
+                    annotation_text="Oggi", annotation_position="top right",
+                    annotation_font=dict(color=C_CY, size=11),
+                )
+                _fig_p.update_layout(**_fig_layout(
+                    height=340, showlegend=True,
+                    legend=dict(orientation='h', y=-0.22, x=0.5, xanchor='center', title_text=''),
+                ))
+                _fig_p.update_xaxes(
+                    title_text="Giorni prima dell'inizio del mese",
+                    autorange='reversed',
+                    showgrid=True, gridcolor=_GRID,
+                )
+                _fig_p.update_yaxes(
+                    title_text="Revenue Cumulativo (€)",
+                    showgrid=True, gridcolor=_GRID,
+                    tickprefix='€',
+                )
+                st.plotly_chart(_fig_p, use_container_width=True)
+
+            with _pcol2:
+                if not _pace_cy.empty and not _pace_ly.empty:
+                    _cy_now_df = _pace_cy[_pace_cy['days_out'] >= _days_oggi]
+                    _ly_now_df = _pace_ly[_pace_ly['days_out'] >= _days_oggi]
+                    _cy_rev_now = float(_cy_now_df['cum_rev'].max()) if not _cy_now_df.empty else float(_pace_cy['cum_rev'].max())
+                    _ly_rev_now = float(_ly_now_df['cum_rev'].max()) if not _ly_now_df.empty else float(_pace_ly['cum_rev'].max())
+                    st.metric(f"📦 OTB {mes_nombre}", f"€{_cy_rev_now:,.0f}",
+                              f"€{_cy_rev_now - _ly_rev_now:+,.0f} vs STLY")
+                    if not _pace_ly_fin.empty:
+                        _ly_fin_max = float(_pace_ly_fin['cum_rev'].max())
+                        if _ly_fin_max > 0:
+                            st.metric("🎯 % su STLY Finale", f"{_cy_rev_now / _ly_fin_max * 100:.0f}%")
+                    _d_lbl = f"{abs(_days_oggi)} gg {'prima' if _days_oggi >= 0 else 'dopo inizio mese'}"
+                    st.caption(f"📍 {_d_lbl}")
+        else:
+            st.info("Dati insufficienti per la curva di pace.")
 
 
     # ── AI section variables (rendered in tab_strategia below) ──
