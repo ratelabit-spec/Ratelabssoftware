@@ -350,12 +350,15 @@ def load_total_units(user_id):
 
 @st.cache_data(ttl=3600)
 def load_portfolio_costs(user_id):
-    """Carica i costi fissi e variabili attivi per tutto il portafoglio (usato dal Cervello Matematico)."""
-    res_fix = supabase.table('fixed_costs').select('*').eq('user_id', user_id).is_('valid_to', 'null').execute()
-    res_var = supabase.table('variable_costs').select('*').eq('user_id', user_id).is_('valid_to', 'null').execute()
-    df_fix = pd.DataFrame(res_fix.data) if res_fix.data else pd.DataFrame(columns=['amount', 'frequency', 'valid_to'])
-    df_var = pd.DataFrame(res_var.data) if res_var.data else pd.DataFrame(columns=['value', 'basis', 'valid_to'])
-    return df_fix, df_var
+    """Carica costi fissi, variabili e bollette utenze per il Cervello Matematico."""
+    res_fix  = supabase.table('fixed_costs').select('*').eq('user_id', user_id).is_('valid_to', 'null').execute()
+    res_var  = supabase.table('variable_costs').select('*').eq('user_id', user_id).is_('valid_to', 'null').execute()
+    cutoff   = (pd.Timestamp.now() - pd.DateOffset(months=12)).strftime('%Y-%m-%d')
+    res_util = supabase.table('utility_bills').select('*').eq('user_id', user_id).gte('period_to', cutoff).execute()
+    df_fix  = pd.DataFrame(res_fix.data)  if res_fix.data  else pd.DataFrame(columns=['amount', 'frequency', 'valid_to'])
+    df_var  = pd.DataFrame(res_var.data)  if res_var.data  else pd.DataFrame(columns=['value', 'basis', 'valid_to'])
+    df_util = pd.DataFrame(res_util.data) if res_util.data else pd.DataFrame(columns=['amount', 'period_from', 'period_to'])
+    return df_fix, df_var, df_util
 
 
 def _run_scraper(user_id, target_date):
@@ -679,8 +682,8 @@ if not df_cloud.empty:
     # =====================================================
     # CERVELLO MATEMATICO — BOTTOM RATE
     # =====================================================
-    df_fix_portfolio, df_var_portfolio = load_portfolio_costs(USER_ID)
-    costos_configurados = not df_fix_portfolio.empty or not df_var_portfolio.empty
+    df_fix_portfolio, df_var_portfolio, df_util_portfolio = load_portfolio_costs(USER_ID)
+    costos_configurados = not df_fix_portfolio.empty or not df_var_portfolio.empty or not df_util_portfolio.empty
 
     bottom_rate = 0.0
     fixed_per_night = 0.0
@@ -690,6 +693,10 @@ if not df_cloud.empty:
             df_fix_portfolio[df_fix_portfolio['frequency'] == 'yearly']['amount'].sum() +
             df_fix_portfolio[df_fix_portfolio['frequency'] == 'monthly']['amount'].sum() * 12
         ) if not df_fix_portfolio.empty else 0.0
+
+        # Utenze: somma delle bollette degli ultimi 12 mesi come stima annua
+        util_annual = float(df_util_portfolio['amount'].sum()) if not df_util_portfolio.empty else 0.0
+        fixed_annual += util_annual
 
         los_est = max(k['los'], 1.0)
         var_per_night = 0.0
@@ -1699,16 +1706,18 @@ Obiettivo: [risultato atteso]
 
         # 3. Descarga de datos y cálculo
         with st.spinner("Calcolando i margini..."):
-            res_res = supabase.table('reservations').select('*').eq('property_id', p_id).execute()
-            res_fix = supabase.table('fixed_costs').select('*').eq('property_id', p_id).execute()
-            res_var = supabase.table('variable_costs').select('*').eq('property_id', p_id).execute()
+            res_res  = supabase.table('reservations').select('*').eq('property_id', p_id).execute()
+            res_fix  = supabase.table('fixed_costs').select('*').eq('property_id', p_id).execute()
+            res_var  = supabase.table('variable_costs').select('*').eq('property_id', p_id).execute()
+            res_util = supabase.table('utility_bills').select('*').eq('property_id', p_id).execute()
 
-            df_res = pd.DataFrame(res_res.data) if res_res.data else pd.DataFrame()
-            df_fix = pd.DataFrame(res_fix.data) if res_fix.data else pd.DataFrame(columns=['amount','frequency','valid_to'])
-            df_var = pd.DataFrame(res_var.data) if res_var.data else pd.DataFrame(columns=['value','basis','valid_to'])
+            df_res  = pd.DataFrame(res_res.data)  if res_res.data  else pd.DataFrame()
+            df_fix  = pd.DataFrame(res_fix.data)  if res_fix.data  else pd.DataFrame(columns=['amount','frequency','valid_to'])
+            df_var  = pd.DataFrame(res_var.data)  if res_var.data  else pd.DataFrame(columns=['value','basis','valid_to'])
+            df_util = pd.DataFrame(res_util.data) if res_util.data else pd.DataFrame(columns=['amount','period_from','period_to','category'])
 
             if not df_res.empty:
-                fatturato, ota, variabili, fissi, netto = calculate_property_margins(df_res, df_fix, df_var, anno)
+                fatturato, ota, variabili, fissi, netto = calculate_property_margins(df_res, df_fix, df_var, anno, df_util)
 
                 if not df_var.empty and (df_var['basis'] == 'per_guest').any():
                     st.caption("ℹ️ I costi 'per ospite' sono calcolati stimando 2 ospiti per prenotazione (dato non disponibile dal PMS).")
@@ -1717,10 +1726,19 @@ Obiettivo: [risultato atteso]
                 st.subheader("🎯 Calcolatore: Tariffa Minima e di Partenza")
                 st.write("Usa i costi operativi attuali per definire i tuoi prezzi base.")
                 
-                # Agrupamos los costos actuales para el cálculo
-                costi_fissi_annuali = df_fix[df_fix['frequency'] == 'yearly']['amount'].sum() + (df_fix[df_fix['frequency'] == 'monthly']['amount'].sum() * 12)
-                costi_var_prenotazione = df_var[df_var['basis'] == 'per_booking']['value'].sum()
-                costi_var_notte = df_var[df_var['basis'] == 'per_night']['value'].sum()
+                # Costi strutturali annui
+                costi_fissi_annuali = (
+                    (df_fix[df_fix['frequency'] == 'yearly']['amount'].sum() +
+                     df_fix[df_fix['frequency'] == 'monthly']['amount'].sum() * 12)
+                    if not df_fix.empty else 0.0
+                )
+                # Utenze: somma delle bollette disponibili (stima annua)
+                if not df_util.empty:
+                    df_util['period_to'] = pd.to_datetime(df_util['period_to'], errors='coerce')
+                    _cutoff_12m = pd.Timestamp.now() - pd.DateOffset(months=12)
+                    costi_fissi_annuali += float(df_util[df_util['period_to'] >= _cutoff_12m]['amount'].sum())
+                costi_var_prenotazione = df_var[df_var['basis'] == 'per_booking']['value'].sum() if not df_var.empty else 0.0
+                costi_var_notte = df_var[df_var['basis'] == 'per_night']['value'].sum() if not df_var.empty else 0.0
 
                 col_calc1, col_calc2 = st.columns(2)
                 
@@ -2252,15 +2270,15 @@ Obiettivo: [risultato atteso]
         st.caption("Configura una sola volta i costi per ogni unità — vengono applicati automaticamente a tutte le prenotazioni future. Se aggiorni una categoria già esistente, il vecchio valore viene storicizzato.")
 
         _FISSI_CAT = [
-            "IMU", "TARI", "Luce", "Gas", "Internet / WiFi",
-            "Assicurazione", "Affitto", "Pulizie comuni",
-            "Manutenzione", "Altra spesa fissa",
+            "IMU", "TARI", "Assicurazione", "Affitto",
+            "Internet / WiFi", "Pulizie comuni", "Manutenzione", "Altra spesa fissa",
         ]
+        _UTIL_CAT  = ["Luce", "Gas", "Acqua", "Condominio", "Altra utenza"]
         _VAR_CAT = {
             "cleaning":  "🧹 Pulizia appartamento",
             "laundry":   "👕 Lavanderia / Biancheria",
             "amenities": "🎁 Kit benvenuto / Dotazioni",
-            "other":     "🔧 Altro costo variabile",
+            "other":     "🔧 Altro costo operativo",
         }
         _VAR_LABELS = list(_VAR_CAT.values())
         _VAR_KEYS   = list(_VAR_CAT.keys())
@@ -2274,11 +2292,13 @@ Obiettivo: [risultato atteso]
             prop_c_nome = st.selectbox("🏠 Unità:", list(props_c.keys()), key="prop_cost_sel")
             prop_c_id   = props_c[prop_c_nome]
 
-            # Carica costi attivi per questa proprietà (valid_to IS NULL)
-            _rfix = supabase.table('fixed_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
-            _rvar = supabase.table('variable_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
-            df_fix_c = pd.DataFrame(_rfix.data) if _rfix.data else pd.DataFrame()
-            df_var_c = pd.DataFrame(_rvar.data) if _rvar.data else pd.DataFrame()
+            # Carica costi attivi per questa proprietà
+            _rfix  = supabase.table('fixed_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
+            _rvar  = supabase.table('variable_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
+            _rutil = supabase.table('utility_bills').select('*').eq('property_id', prop_c_id).order('period_to', desc=True).limit(8).execute()
+            df_fix_c  = pd.DataFrame(_rfix.data)  if _rfix.data  else pd.DataFrame()
+            df_var_c  = pd.DataFrame(_rvar.data)  if _rvar.data  else pd.DataFrame()
+            df_util_c = pd.DataFrame(_rutil.data) if _rutil.data else pd.DataFrame()
 
             cl_left, cl_right = st.columns([3, 2])
 
@@ -2286,8 +2306,9 @@ Obiettivo: [risultato atteso]
             with cl_left:
                 st.markdown("##### 📋 Costi configurati per questa unità")
 
+                # ── Spese strutturali ──
+                st.caption("**🏛️ Spese Strutturali** — IMU, TARI, assicurazione, affitto…")
                 if not df_fix_c.empty:
-                    st.caption("**Costi Fissi** (ricorrenti — IMU, TARI, utenze, ecc.)")
                     _dfs = df_fix_c[['category', 'amount', 'frequency', 'valid_from']].copy()
                     _dfs.columns = ['Categoria', 'Importo (€)', 'Frequenza', 'Dal']
                     _dfs['Importo (€)'] = _dfs['Importo (€)'].apply(lambda x: f"€ {x:,.2f}")
@@ -2295,10 +2316,24 @@ Obiettivo: [risultato atteso]
                     _dfs['Dal']         = pd.to_datetime(_dfs['Dal']).dt.strftime('%d/%m/%Y')
                     st.markdown(_html_table(_dfs, num_cols=[]), unsafe_allow_html=True)
                 else:
-                    st.info("Nessun costo fisso configurato. Aggiungi IMU, TARI, utenze dal modulo →")
+                    st.info("Nessuna spesa strutturale configurata.")
 
+                # ── Bollette utenze ──
+                st.caption("**⚡ Bollette Utenze** — ultime 8 inserite (luce, gas, acqua…)")
+                if not df_util_c.empty:
+                    _dfu = df_util_c[['category', 'amount', 'period_from', 'period_to', 'notes']].copy()
+                    _dfu.columns = ['Utenza', 'Importo (€)', 'Dal', 'Al', 'Note']
+                    _dfu['Importo (€)'] = _dfu['Importo (€)'].apply(lambda x: f"€ {x:,.2f}")
+                    _dfu['Dal'] = pd.to_datetime(_dfu['Dal']).dt.strftime('%d/%m/%Y')
+                    _dfu['Al']  = pd.to_datetime(_dfu['Al']).dt.strftime('%d/%m/%Y')
+                    _dfu['Note'] = _dfu['Note'].fillna('—')
+                    st.markdown(_html_table(_dfu, num_cols=[]), unsafe_allow_html=True)
+                else:
+                    st.info("Nessuna bolletta inserita ancora.")
+
+                # ── Costi operativi per prenotazione ──
+                st.caption("**🔑 Costi per Prenotazione** — pulizie, lavanderia…")
                 if not df_var_c.empty:
-                    st.caption("**Costi Variabili** (per prenotazione / notte / ospite)")
                     _dvs = df_var_c[['cost_type', 'value', 'basis', 'valid_from']].copy()
                     _dvs['cost_type'] = _dvs['cost_type'].map({k: v.split(' ', 1)[1] for k, v in _VAR_CAT.items()})
                     _dvs['basis']     = _dvs['basis'].map({
@@ -2311,53 +2346,96 @@ Obiettivo: [risultato atteso]
                     _dvs['Dal']         = pd.to_datetime(_dvs['Dal']).dt.strftime('%d/%m/%Y')
                     st.markdown(_html_table(_dvs, num_cols=[]), unsafe_allow_html=True)
                 else:
-                    st.info("Nessun costo variabile configurato. Aggiungi pulizie, lavanderia, ecc. dal modulo →")
+                    st.info("Nessun costo operativo configurato.")
 
-            # ── PANNELLO DESTRA: form aggiunta/aggiornamento ──
-            # Il selettore tipo è FUORI dal form: cambiandolo fa scattare un rerun
-            # e aggiorna dinamicamente i campi mostrati nel form sottostante.
+            # ── PANNELLO DESTRA: form aggiunta ──
             with cl_right:
-                st.markdown("##### ➕ Aggiungi o aggiorna")
-                tipo_c = st.radio("Tipo:", ["💸 Fisso", "🔄 Variabile"],
-                                  horizontal=True, key="tipo_costo_radio")
+                st.markdown("##### ➕ Aggiungi costo")
+                tipo_c = st.radio(
+                    "Tipo:",
+                    ["🏛️ Strutturale", "⚡ Bolletta Utenza", "🔑 Per Prenotazione"],
+                    horizontal=False, key="tipo_costo_radio",
+                )
 
-                with st.form("form_costi_v2"):
-                    if tipo_c == "💸 Fisso":
+                if tipo_c == "🏛️ Strutturale":
+                    st.caption("IMU, TARI, assicurazione, affitto — importo fisso mensile o annuale.")
+                    with st.form("form_costi_fix"):
                         motivo_c  = st.selectbox("Categoria:", _FISSI_CAT)
                         importo_c = st.number_input("Importo (€)", min_value=0.0, step=10.0, format="%.2f")
                         freq_lbl  = st.radio("Frequenza:", ["Mensile", "Annuale"], horizontal=True)
-                        base_c, canal_c = None, None
-                        freq_c    = "monthly" if freq_lbl == "Mensile" else "yearly"
-                        tipo_db_c = "Fijo"
-                    else:
+                        data_c    = st.date_input("Valido dal:", datetime.date.today())
+                        if st.form_submit_button("💾 Salva", type="primary"):
+                            if importo_c <= 0:
+                                st.error("Importo deve essere > 0.")
+                            else:
+                                try:
+                                    ok_c, msg_c = update_or_insert_cost(
+                                        supabase, USER_ID, prop_c_id, "Fijo", motivo_c, importo_c, data_c,
+                                        None, None, "monthly" if freq_lbl == "Mensile" else "yearly",
+                                    )
+                                    if ok_c:
+                                        st.success(f"✅ {motivo_c} — €{importo_c:.2f}/{freq_lbl.lower()} salvato.")
+                                        st.cache_data.clear(); st.rerun()
+                                    else:
+                                        st.error(msg_c)
+                                except Exception as e:
+                                    st.error(f"Errore: {e}")
+
+                elif tipo_c == "⚡ Bolletta Utenza":
+                    st.caption("Inserisci ogni bolletta con il suo periodo — il sistema prorata il costo sui giorni corretti.")
+                    with st.form("form_costi_util"):
+                        cat_u     = st.selectbox("Utenza:", _UTIL_CAT)
+                        importo_c = st.number_input("Importo bolletta (€)", min_value=0.0, step=1.0, format="%.2f")
+                        uc1, uc2  = st.columns(2)
+                        data_from = uc1.date_input("Dal:", datetime.date.today().replace(day=1))
+                        data_to   = uc2.date_input("Al:", datetime.date.today())
+                        note_c    = st.text_input("Note (opzionale)", placeholder="es. Bimestre gen-feb 2025")
+                        if st.form_submit_button("💾 Salva Bolletta", type="primary"):
+                            if importo_c <= 0:
+                                st.error("Importo deve essere > 0.")
+                            elif data_to < data_from:
+                                st.error("La data 'Al' deve essere successiva alla data 'Dal'.")
+                            else:
+                                try:
+                                    supabase.table('utility_bills').insert({
+                                        "user_id":     USER_ID,
+                                        "property_id": prop_c_id,
+                                        "category":    cat_u,
+                                        "amount":      float(importo_c),
+                                        "period_from": data_from.isoformat(),
+                                        "period_to":   data_to.isoformat(),
+                                        "notes":       note_c or None,
+                                    }).execute()
+                                    st.success(f"✅ Bolletta {cat_u} €{importo_c:.2f} salvata ({data_from.strftime('%d/%m')}–{data_to.strftime('%d/%m/%Y')}).")
+                                    st.cache_data.clear(); st.rerun()
+                                except Exception as e:
+                                    st.error(f"Errore: {e}")
+
+                else:  # Per Prenotazione
+                    st.caption("Pulizie, lavanderia, kit — costo che si applica ad ogni arrivo.")
+                    with st.form("form_costi_var"):
                         var_lbl   = st.selectbox("Categoria:", _VAR_LABELS)
                         motivo_c  = _VAR_KEYS[_VAR_LABELS.index(var_lbl)]
                         importo_c = st.number_input("Importo (€)", min_value=0.0, step=5.0, format="%.2f")
                         base_lbl  = st.radio("Si applica:", ["Per prenotazione", "Per notte", "Per ospite"], horizontal=True)
                         base_c    = {"Per prenotazione": "per_booking", "Per notte": "per_night", "Per ospite": "per_guest"}[base_lbl]
-                        canal_c, freq_c = None, None
-                        tipo_db_c = "Variable"
-
-                    data_c = st.date_input("Valido dal:", datetime.date.today())
-
-                    if st.form_submit_button("💾 Salva", type="primary"):
-                        if importo_c <= 0:
-                            st.error("L'importo deve essere maggiore di 0.")
-                        else:
-                            try:
-                                ok_c, msg_c = update_or_insert_cost(
-                                    supabase, USER_ID, prop_c_id,
-                                    tipo_db_c, motivo_c, importo_c, data_c,
-                                    base_c, canal_c, freq_c,
-                                )
-                                if ok_c:
-                                    st.success(f"✅ Salvato — €{importo_c:.2f} per '{motivo_c}' dal {data_c.strftime('%d/%m/%Y')}.")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                                else:
-                                    st.error(msg_c)
-                            except Exception as e:
-                                st.error(f"Errore: {e}")
+                        data_c    = st.date_input("Valido dal:", datetime.date.today())
+                        if st.form_submit_button("💾 Salva", type="primary"):
+                            if importo_c <= 0:
+                                st.error("Importo deve essere > 0.")
+                            else:
+                                try:
+                                    ok_c, msg_c = update_or_insert_cost(
+                                        supabase, USER_ID, prop_c_id, "Variable", motivo_c, importo_c, data_c,
+                                        base_c, None, None,
+                                    )
+                                    if ok_c:
+                                        st.success(f"✅ {var_lbl.split(' ',1)[1]} — €{importo_c:.2f} {base_lbl.lower()} salvato.")
+                                        st.cache_data.clear(); st.rerun()
+                                    else:
+                                        st.error(msg_c)
+                                except Exception as e:
+                                    st.error(f"Errore: {e}")
 
 else:
     # =====================================================

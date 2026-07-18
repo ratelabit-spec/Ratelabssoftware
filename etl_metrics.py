@@ -1,7 +1,7 @@
 # etl_metrics.py
 import pandas as pd
 
-def calculate_property_margins(df_res, df_fixed, df_vars, year):
+def calculate_property_margins(df_res, df_fixed, df_vars, year, df_util=None):
     """Cruza reservas con costes para obtener el desglose financiero."""
     
     # Defensa 1: Si no hay reservas en absoluto, salimos rápido
@@ -53,7 +53,27 @@ def calculate_property_margins(df_res, df_fixed, df_vars, year):
             else: # yearly
                 fixed_costs_total += val
 
+    # 4b. Bollette utenze — proratate per l'anno analizzato
+    util_costs_total = 0.0
+    if df_util is not None and not df_util.empty:
+        df_util = df_util.copy()
+        df_util['period_from'] = pd.to_datetime(df_util['period_from'], errors='coerce')
+        df_util['period_to']   = pd.to_datetime(df_util['period_to'],   errors='coerce')
+        year_start = pd.Timestamp(year, 1, 1)
+        year_end   = pd.Timestamp(year, 12, 31)
+        for _, bill in df_util.iterrows():
+            p_from = bill['period_from']
+            p_to   = bill['period_to']
+            if pd.isna(p_from) or pd.isna(p_to):
+                continue
+            overlap_start = max(p_from, year_start)
+            overlap_end   = min(p_to, year_end)
+            if overlap_end >= overlap_start:
+                bill_days    = max((p_to - p_from).days + 1, 1)
+                overlap_days = (overlap_end - overlap_start).days + 1
+                util_costs_total += float(bill['amount']) * overlap_days / bill_days
+
     # 5. Margen Final
-    netto_pm = gross_revenue - ota_commissions - var_costs_total - fixed_costs_total
-    
-    return gross_revenue, -ota_commissions, -var_costs_total, -fixed_costs_total, netto_pm
+    netto_pm = gross_revenue - ota_commissions - var_costs_total - fixed_costs_total - util_costs_total
+
+    return gross_revenue, -ota_commissions, -var_costs_total, -(fixed_costs_total + util_costs_total), netto_pm

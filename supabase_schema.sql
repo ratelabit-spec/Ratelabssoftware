@@ -269,3 +269,32 @@ CREATE POLICY "pms_mappings_own" ON pms_mappings
     FOR ALL TO authenticated
     USING  (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
+
+
+-- ──────────────────────────────────────────
+-- 10. UTILITY_BILLS  (bollette utenze a consumo)
+-- ──────────────────────────────────────────
+-- Ogni bolletta ha un periodo specifico (period_from → period_to).
+-- Categorie: 'luce', 'gas', 'acqua', 'condominio', 'altro'
+-- Non usa valid_from/valid_to: ogni bolletta è un record storico distinto.
+CREATE TABLE IF NOT EXISTS utility_bills (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID NOT NULL,
+    property_id  UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+    category     TEXT NOT NULL,
+    amount       NUMERIC(10,2) NOT NULL,
+    period_from  DATE NOT NULL,
+    period_to    DATE NOT NULL,
+    notes        TEXT,
+    created_at   TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE utility_bills ENABLE ROW LEVEL SECURITY;
+
+CREATE INDEX IF NOT EXISTS utility_bills_property_period_idx
+    ON utility_bills (property_id, period_from, period_to);
+
+CREATE POLICY "utility_bills_own" ON utility_bills
+    FOR ALL TO authenticated
+    USING  (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
