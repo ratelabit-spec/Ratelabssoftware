@@ -2314,12 +2314,14 @@ Obiettivo: [risultato atteso]
                     st.info("Nessun costo variabile configurato. Aggiungi pulizie, lavanderia, ecc. dal modulo →")
 
             # ── PANNELLO DESTRA: form aggiunta/aggiornamento ──
+            # Il selettore tipo è FUORI dal form: cambiandolo fa scattare un rerun
+            # e aggiorna dinamicamente i campi mostrati nel form sottostante.
             with cl_right:
                 st.markdown("##### ➕ Aggiungi o aggiorna")
+                tipo_c = st.radio("Tipo:", ["💸 Fisso", "🔄 Variabile"],
+                                  horizontal=True, key="tipo_costo_radio")
 
                 with st.form("form_costi_v2"):
-                    tipo_c = st.radio("Tipo:", ["💸 Fisso", "🔄 Variabile"], horizontal=True)
-
                     if tipo_c == "💸 Fisso":
                         motivo_c  = st.selectbox("Categoria:", _FISSI_CAT)
                         importo_c = st.number_input("Importo (€)", min_value=0.0, step=10.0, format="%.2f")
