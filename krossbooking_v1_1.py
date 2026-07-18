@@ -2247,68 +2247,115 @@ Obiettivo: [risultato atteso]
 
         st.divider()
 
-        # --- SEZIONE 4: INSERIMENTO COSTI (DATA ENTRY) ---
-        st.subheader("📝 Inserimento e Aggiornamento Costi")
-        st.write("Gestisci i costi fissi e variabili per calcolare il Netto PM.")
-        
-        # Obtenemos las propiedades del usuario para el selector
-        res_props = supabase.table('properties').select('id, kross_unit_id').eq('user_id', USER_ID).execute()
-        props_dict = {p['kross_unit_id']: p['id'] for p in res_props.data} if res_props.data else {}
-        
-        if not props_dict:
-            st.info("Carica un file di prenotazioni per registrare le tue proprietà prima di inserire i costi.")
+        # --- SEZIONE 4: CONFIGURAZIONE COSTI PERMANENTI ---
+        st.subheader("⚙️ Configurazione Costi")
+        st.caption("Configura una sola volta i costi per ogni unità — vengono applicati automaticamente a tutte le prenotazioni future. Se aggiorni una categoria già esistente, il vecchio valore viene storicizzato.")
+
+        _FISSI_CAT = [
+            "IMU", "TARI", "Luce", "Gas", "Internet / WiFi",
+            "Assicurazione", "Affitto", "Pulizie comuni",
+            "Manutenzione", "Altra spesa fissa",
+        ]
+        _VAR_CAT = {
+            "cleaning":  "🧹 Pulizia appartamento",
+            "laundry":   "👕 Lavanderia / Biancheria",
+            "amenities": "🎁 Kit benvenuto / Dotazioni",
+            "other":     "🔧 Altro costo variabile",
+        }
+        _VAR_LABELS = list(_VAR_CAT.values())
+        _VAR_KEYS   = list(_VAR_CAT.keys())
+
+        res_props_c = supabase.table('properties').select('id, kross_unit_id').eq('user_id', USER_ID).execute()
+        props_c     = {p['kross_unit_id']: p['id'] for p in res_props_c.data} if res_props_c.data else {}
+
+        if not props_c:
+            st.info("Carica un file di prenotazioni per registrare le tue proprietà prima di configurare i costi.")
         else:
-            with st.form("form_costi"):
-                col_prop, col_tipo = st.columns(2)
-                
-                with col_prop:
-                    prop_selezionata_nome = st.selectbox("Seleziona Proprietà", list(props_dict.keys()))
-                    selected_property_id = props_dict[prop_selezionata_nome]
-                
-                with col_tipo:
-                    tipo_coste = st.selectbox("Tipo di Costo", ["Fisso", "Variabile"])
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    fecha_inicio = st.date_input("Data di inizio validità", datetime.date.today())
-                    monto = st.number_input("Importo (€ o %)", min_value=0.0, step=1.0)
-                    
-                with col2:
-                    if tipo_coste == "Fisso":
-                        motivo = st.text_input("Motivo (Es: Affitto, Internet, Assicurazione)")
-                        frecuencia = st.selectbox("Frequenza", ["monthly", "yearly"])
-                        base_calculo = None
-                        canal = None
+            prop_c_nome = st.selectbox("🏠 Unità:", list(props_c.keys()), key="prop_cost_sel")
+            prop_c_id   = props_c[prop_c_nome]
+
+            # Carica costi attivi per questa proprietà (valid_to IS NULL)
+            _rfix = supabase.table('fixed_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
+            _rvar = supabase.table('variable_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
+            df_fix_c = pd.DataFrame(_rfix.data) if _rfix.data else pd.DataFrame()
+            df_var_c = pd.DataFrame(_rvar.data) if _rvar.data else pd.DataFrame()
+
+            cl_left, cl_right = st.columns([3, 2])
+
+            # ── PANNELLO SINISTRA: riepilogo costi attivi ──
+            with cl_left:
+                st.markdown("##### 📋 Costi configurati per questa unità")
+
+                if not df_fix_c.empty:
+                    st.caption("**Costi Fissi** (ricorrenti — IMU, TARI, utenze, ecc.)")
+                    _dfs = df_fix_c[['category', 'amount', 'frequency', 'valid_from']].copy()
+                    _dfs.columns = ['Categoria', 'Importo (€)', 'Frequenza', 'Dal']
+                    _dfs['Importo (€)'] = _dfs['Importo (€)'].apply(lambda x: f"€ {x:,.2f}")
+                    _dfs['Frequenza']   = _dfs['Frequenza'].map({'monthly': 'Mensile', 'yearly': 'Annuale'})
+                    _dfs['Dal']         = pd.to_datetime(_dfs['Dal']).dt.strftime('%d/%m/%Y')
+                    st.markdown(_html_table(_dfs, num_cols=[]), unsafe_allow_html=True)
+                else:
+                    st.info("Nessun costo fisso configurato. Aggiungi IMU, TARI, utenze dal modulo →")
+
+                if not df_var_c.empty:
+                    st.caption("**Costi Variabili** (per prenotazione / notte / ospite)")
+                    _dvs = df_var_c[['cost_type', 'value', 'basis', 'valid_from']].copy()
+                    _dvs['cost_type'] = _dvs['cost_type'].map({k: v.split(' ', 1)[1] for k, v in _VAR_CAT.items()})
+                    _dvs['basis']     = _dvs['basis'].map({
+                        'per_booking': 'per prenotazione',
+                        'per_night':   'per notte',
+                        'per_guest':   'per ospite',
+                    })
+                    _dvs.columns = ['Categoria', 'Importo (€)', 'Si applica', 'Dal']
+                    _dvs['Importo (€)'] = _dvs['Importo (€)'].apply(lambda x: f"€ {x:,.2f}")
+                    _dvs['Dal']         = pd.to_datetime(_dvs['Dal']).dt.strftime('%d/%m/%Y')
+                    st.markdown(_html_table(_dvs, num_cols=[]), unsafe_allow_html=True)
+                else:
+                    st.info("Nessun costo variabile configurato. Aggiungi pulizie, lavanderia, ecc. dal modulo →")
+
+            # ── PANNELLO DESTRA: form aggiunta/aggiornamento ──
+            with cl_right:
+                st.markdown("##### ➕ Aggiungi o aggiorna")
+
+                with st.form("form_costi_v2"):
+                    tipo_c = st.radio("Tipo:", ["💸 Fisso", "🔄 Variabile"], horizontal=True)
+
+                    if tipo_c == "💸 Fisso":
+                        motivo_c  = st.selectbox("Categoria:", _FISSI_CAT)
+                        importo_c = st.number_input("Importo (€)", min_value=0.0, step=10.0, format="%.2f")
+                        freq_lbl  = st.radio("Frequenza:", ["Mensile", "Annuale"], horizontal=True)
+                        base_c, canal_c = None, None
+                        freq_c    = "monthly" if freq_lbl == "Mensile" else "yearly"
+                        tipo_db_c = "Fijo"
                     else:
-                        # Fuera comisiones, solo costos operativos
-                        motivo = st.selectbox("Categoria", ["cleaning", "laundry", "amenities", "other"])
-                        base_calculo = st.selectbox("Come si applica?", ["per_booking", "per_night", "per_guest"])
-                        canal = None
-                        frecuencia = None
-                
-                submitted_costo = st.form_submit_button("💾 Salva Costo")
-                
-                if submitted_costo:
-                    if not motivo:
-                        st.error("Devi inserire il motivo o la categoria.")
-                    else:
-                        try:
-                            update_or_insert_cost(
-                                supabase, 
-                                USER_ID, 
-                                selected_property_id, 
-                                "Fijo" if tipo_coste == "Fisso" else "Variable", 
-                                motivo, 
-                                monto, 
-                                fecha_inicio, 
-                                base_calculo, # Reemplazamos 'es_porcentaje' por 'base_calculo'
-                                canal, 
-                                frecuencia
-                            )
-                            st.success(f"✅ Costo di '{motivo}' salvato con successo a partire dal {fecha_inicio}.")
-                        except Exception as e:
-                            st.error(f"Errore durante il salvataggio: {e}")
+                        var_lbl   = st.selectbox("Categoria:", _VAR_LABELS)
+                        motivo_c  = _VAR_KEYS[_VAR_LABELS.index(var_lbl)]
+                        importo_c = st.number_input("Importo (€)", min_value=0.0, step=5.0, format="%.2f")
+                        base_lbl  = st.radio("Si applica:", ["Per prenotazione", "Per notte", "Per ospite"], horizontal=True)
+                        base_c    = {"Per prenotazione": "per_booking", "Per notte": "per_night", "Per ospite": "per_guest"}[base_lbl]
+                        canal_c, freq_c = None, None
+                        tipo_db_c = "Variable"
+
+                    data_c = st.date_input("Valido dal:", datetime.date.today())
+
+                    if st.form_submit_button("💾 Salva", type="primary"):
+                        if importo_c <= 0:
+                            st.error("L'importo deve essere maggiore di 0.")
+                        else:
+                            try:
+                                ok_c, msg_c = update_or_insert_cost(
+                                    supabase, USER_ID, prop_c_id,
+                                    tipo_db_c, motivo_c, importo_c, data_c,
+                                    base_c, canal_c, freq_c,
+                                )
+                                if ok_c:
+                                    st.success(f"✅ Salvato — €{importo_c:.2f} per '{motivo_c}' dal {data_c.strftime('%d/%m/%Y')}.")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                else:
+                                    st.error(msg_c)
+                            except Exception as e:
+                                st.error(f"Errore: {e}")
 
 else:
     # =====================================================
