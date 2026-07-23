@@ -1,7 +1,7 @@
 # etl_metrics.py
 import pandas as pd
 
-def calculate_property_margins(df_res, df_fixed, df_vars, year, df_util=None):
+def calculate_property_margins(df_res, df_fixed, df_vars, year, df_util=None, cleaning_fee=0.0):
     """Cruza reservas con costes para obtener el desglose financiero."""
     
     # Defensa 1: Si no hay reservas en absoluto, salimos rápido
@@ -23,7 +23,8 @@ def calculate_property_margins(df_res, df_fixed, df_vars, year, df_util=None):
     total_noches = df_res_year['nights'].sum()
 
     # 2. Ingresos y comisiones (Directo de las reservas)
-    gross_revenue = float(df_res_year['gross_revenue'].sum())
+    # cleaning_fee viene sommata perché il PMS non la include nel gross_revenue
+    gross_revenue = float(df_res_year['gross_revenue'].sum()) + float(cleaning_fee) * total_reservas
     ota_commissions = float(df_res_year['commission_amount'].sum())
 
     # 3. Costes Variables Manuales (Vigentes)

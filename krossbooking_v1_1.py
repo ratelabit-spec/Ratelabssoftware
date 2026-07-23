@@ -1710,14 +1710,16 @@ Obiettivo: [risultato atteso]
             res_fix  = supabase.table('fixed_costs').select('*').eq('property_id', p_id).execute()
             res_var  = supabase.table('variable_costs').select('*').eq('property_id', p_id).execute()
             res_util = supabase.table('utility_bills').select('*').eq('property_id', p_id).execute()
+            res_prop = supabase.table('properties').select('cleaning_fee').eq('id', p_id).execute()
 
             df_res  = pd.DataFrame(res_res.data)  if res_res.data  else pd.DataFrame()
             df_fix  = pd.DataFrame(res_fix.data)  if res_fix.data  else pd.DataFrame(columns=['amount','frequency','valid_to'])
             df_var  = pd.DataFrame(res_var.data)  if res_var.data  else pd.DataFrame(columns=['value','basis','valid_to'])
             df_util = pd.DataFrame(res_util.data) if res_util.data else pd.DataFrame(columns=['amount','period_from','period_to','category'])
+            cleaning_fee_prop = float(res_prop.data[0].get('cleaning_fee') or 0) if res_prop.data else 0.0
 
             if not df_res.empty:
-                fatturato, ota, variabili, fissi, netto = calculate_property_margins(df_res, df_fix, df_var, anno, df_util)
+                fatturato, ota, variabili, fissi, netto = calculate_property_margins(df_res, df_fix, df_var, anno, df_util, cleaning_fee_prop)
 
                 if not df_var.empty and (df_var['basis'] == 'per_guest').any():
                     st.caption("ℹ️ I costi 'per ospite' sono calcolati stimando 2 ospiti per prenotazione (dato non disponibile dal PMS).")
@@ -2292,13 +2294,28 @@ Obiettivo: [risultato atteso]
             prop_c_nome = st.selectbox("🏠 Unità:", list(props_c.keys()), key="prop_cost_sel")
             prop_c_id   = props_c[prop_c_nome]
 
-            # Carica costi attivi per questa proprietà
+            # Carica costi attivi e cleaning fee per questa proprietà
             _rfix  = supabase.table('fixed_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
             _rvar  = supabase.table('variable_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
             _rutil = supabase.table('utility_bills').select('*').eq('property_id', prop_c_id).order('period_to', desc=True).limit(8).execute()
+            _rprop = supabase.table('properties').select('cleaning_fee').eq('id', prop_c_id).execute()
             df_fix_c  = pd.DataFrame(_rfix.data)  if _rfix.data  else pd.DataFrame()
             df_var_c  = pd.DataFrame(_rvar.data)  if _rvar.data  else pd.DataFrame()
             df_util_c = pd.DataFrame(_rutil.data) if _rutil.data else pd.DataFrame()
+            current_cf = float(_rprop.data[0].get('cleaning_fee') or 0) if _rprop.data else 0.0
+
+            # ── Cleaning fee (ricavo da guest, non incluso nel PMS) ──
+            with st.expander(f"🧹 Quota Pulizie addebitata al Guest — attuale: €{current_cf:.2f}/soggiorno", expanded=(current_cf == 0)):
+                st.caption("Questa quota viene aggiunta al ricavo lordo nel calcolo del margine (non è un costo, è un ricavo non tracciato dal PMS).")
+                with st.form("form_cleaning_fee"):
+                    new_cf = st.number_input("Importo per soggiorno (€):", min_value=0.0, value=current_cf, step=5.0, format="%.2f")
+                    if st.form_submit_button("💾 Aggiorna", type="primary"):
+                        try:
+                            supabase.table('properties').update({"cleaning_fee": float(new_cf)}).eq('id', prop_c_id).execute()
+                            st.success(f"✅ Quota pulizie aggiornata a €{new_cf:.2f}/soggiorno.")
+                            st.cache_data.clear(); st.rerun()
+                        except Exception as e:
+                            st.error(f"Errore: {e}")
 
             cl_left, cl_right = st.columns([3, 2])
 

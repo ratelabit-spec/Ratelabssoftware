@@ -298,3 +298,11 @@ CREATE POLICY "utility_bills_own" ON utility_bills
     FOR ALL TO authenticated
     USING  (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
+
+
+-- ──────────────────────────────────────────
+-- 11. CLEANING FEE per proprietà
+-- ──────────────────────────────────────────
+-- Quota pulizie addebitata al guest, NON inclusa nel gross_revenue del PMS.
+-- Si aggiunge al ricavo lordo nel calcolo del margine (× numero soggiorni).
+ALTER TABLE properties ADD COLUMN IF NOT EXISTS cleaning_fee NUMERIC(10,2) DEFAULT 0;
