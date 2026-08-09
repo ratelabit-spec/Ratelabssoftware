@@ -1421,80 +1421,38 @@ Obiettivo: [risultato atteso]
                 )
 
     with tab_mercato:
-        with st.expander("🔄 Aggiorna Prezzi Competitor", expanded=False):
-            st.caption("Esegue lo scraper su Booking.com per tutti i competitor registrati. 1 data = 1 credito Apify per competitor.")
-            scrape_date = st.date_input(
-                "Data da analizzare",
-                value=date.today() + datetime.timedelta(days=1),
-                min_value=date.today(),
-                key="scrape_date_input"
-            )
-            n_comp = len(supabase.table("competitors").select("id").eq("user_id", USER_ID).execute().data or [])
-            if n_comp > 0:
-                st.info(f"Verranno eseguiti **{n_comp} scraping** (1 per competitor). Durata stimata: 1-3 minuti.")
-            else:
-                st.warning("Nessun competitor registrato. Aggiungili in ⚙️ Dati → Gestione Competitor.")
-            if st.button("🚀 Esegui Scraper", disabled=n_comp == 0, type="primary"):
-                with st.spinner(f"Scraping prezzi per il {scrape_date.strftime('%d/%m/%Y')} — attendere (1-3 min)..."):
-                    _run_scraper(USER_ID, scrape_date)
+        st.divider()
+        st.markdown("""
+        <div style="
+            text-align:center;
+            padding: 3rem 2rem;
+            background: linear-gradient(135deg, #F1F5F9 0%, #E2E8F0 100%);
+            border-radius: 16px;
+            border: 1.5px dashed #94A3B8;
+            margin: 2rem 0;
+        ">
+            <div style="font-size: 3rem; margin-bottom: 0.75rem;">🚧</div>
+            <h2 style="color: #1E293B; font-size: 1.5rem; margin: 0 0 0.5rem 0;">Analisi di Mercato — In Arrivo</h2>
+            <p style="color: #64748B; font-size: 0.95rem; max-width: 480px; margin: 0 auto 1.25rem auto;">
+                Il monitoraggio dei prezzi dei competitor su Booking.com sarà disponibile nella prossima versione.
+                Potrai confrontare le tue tariffe con il mercato in tempo reale.
+            </p>
+            <div style="
+                display: inline-block;
+                background: #1E6FD9;
+                color: white;
+                padding: 0.35rem 1rem;
+                border-radius: 999px;
+                font-size: 0.78rem;
+                font-weight: 600;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+            ">Prossimamente</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     with tab_mercato:
-        st.subheader("🚨 Radar di Sotto-Rendimento")
-        st.markdown(f"Confronto ADR per appartamento vs media portafoglio: **{k['var_adr']:+.1f}%**")
-
-        if not df_cy_otb.empty and not df_ly_otb.empty:
-            apt_cy = df_cy_otb.groupby('unit_id').agg(Rev_cy=('gross_revenue', 'sum'), Notti_cy=('nights', 'sum')).reset_index()
-            apt_cy['ADR_cy'] = apt_cy.apply(lambda r: r['Rev_cy'] / r['Notti_cy'] if r['Notti_cy'] > 0 else 0, axis=1)
-
-            apt_ly = df_ly_otb.groupby('unit_id').agg(Rev_ly=('gross_revenue', 'sum'), Notti_ly=('nights', 'sum')).reset_index()
-            apt_ly['ADR_ly'] = apt_ly.apply(lambda r: r['Rev_ly'] / r['Notti_ly'] if r['Notti_ly'] > 0 else 0, axis=1)
-
-            apt_cmp = pd.merge(apt_cy, apt_ly, on='unit_id')
-            apt_cmp['Var_ADR'] = apt_cmp.apply(
-                lambda r: (r['ADR_cy'] / r['ADR_ly'] - 1) * 100 if r['ADR_ly'] > 0 else 0, axis=1
-            )
-            apt_cmp['Diff_vs_Media'] = apt_cmp['Var_ADR'] - k['var_adr']
-
-            under = apt_cmp[apt_cmp['Diff_vs_Media'] < -2.0].sort_values('Diff_vs_Media')
-
-            if not under.empty:
-                st.error(f"⚠️ {len(under)} appartament{'o' if len(under) == 1 else 'i'} crescono più lentamente della media del portafoglio.")
-                st.dataframe(
-                    under[['unit_id', 'ADR_ly', 'ADR_cy', 'Var_ADR', 'Diff_vs_Media']].rename(columns={
-                        'unit_id': 'Appartamento',
-                        'ADR_ly': 'ADR STLY (€)',
-                        'ADR_cy': 'ADR Attuale (€)',
-                        'Var_ADR': 'Crescita (%)',
-                        'Diff_vs_Media': 'Diff vs Media (%)'
-                    }).style.format({
-                        'ADR STLY (€)': '€ {:.2f}',
-                        'ADR Attuale (€)': '€ {:.2f}',
-                        'Crescita (%)': '{:+.1f}%',
-                        'Diff vs Media (%)': '{:+.1f}%'
-                    }),
-                    use_container_width=True, hide_index=True
-                )
-            else:
-                st.success("✅ Tutti gli appartamenti performano in linea o sopra la media del portafoglio.")
-
-            with st.expander("Vedi confronto completo"):
-                st.dataframe(
-                    apt_cmp[['unit_id', 'ADR_ly', 'ADR_cy', 'Var_ADR', 'Diff_vs_Media']].rename(columns={
-                        'unit_id': 'Appartamento',
-                        'ADR_ly': 'ADR STLY (€)',
-                        'ADR_cy': 'ADR Attuale (€)',
-                        'Var_ADR': 'Crescita (%)',
-                        'Diff_vs_Media': 'Diff vs Media (%)'
-                    }).style.format({
-                        'ADR STLY (€)': '€ {:.2f}',
-                        'ADR Attuale (€)': '€ {:.2f}',
-                        'Crescita (%)': '{:+.1f}%',
-                        'Diff vs Media (%)': '{:+.1f}%'
-                    }),
-                    use_container_width=True, hide_index=True
-                )
-        else:
-            st.info("⚠️ Impossibile generare il radar: dati storici o attuali insufficienti per il confronto.")
+        pass  # coming soon
 
     with tab_revenue:
         st.divider()
@@ -1618,70 +1576,7 @@ Obiettivo: [risultato atteso]
             st.success(f"✅ **Budget on track:** Il forecast supera il target di €{rev_forecast - bud_rev:,.0f}. Valuta di alzare i prezzi per massimizzare il margine.")
     
     with tab_mercato:
-        st.divider()
-        st.subheader("🕵️‍♂️ Analisi Competitiva (Prezzi Pubblici)")
-        st.markdown("Monitoraggio dei prezzi e disponibilità dei tuoi diretti concorrenti su Booking.com.")
-        st.info("ℹ️ **Aggiornamento dati:** i prezzi vengono raccolti eseguendo manualmente `python etl_competitors.py` dal terminale. I dati vengono poi memorizzati nel cloud e mostrati qui (cache 1 ora).")
-
-        if df_market.empty:
-            st.warning("Nessun dato competitivo trovato. Assicurati di aver configurato i competitor nella tabella `competitors` e di aver eseguito lo scraper.")
-        else:
-            # --- 1. SLIDER DE FECHAS ---
-            min_date = df_market['stay_date'].min().date()
-            max_date = df_market['stay_date'].max().date()
-            
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                date_range = st.slider(
-                    "🗓️ Seleziona il periodo da analizzare:",
-                    min_value=min_date,
-                    max_value=max_date,
-                    value=(min_date, max_date),
-                    format="DD/MM/YYYY"
-                )
-            
-            # Filtramos los datos según el slider
-            mask = (df_market['stay_date'].dt.date >= date_range[0]) & (df_market['stay_date'].dt.date <= date_range[1])
-            df_filtered = df_market.loc[mask].copy()
-            
-            # --- 2. LÓGICA DE GRÁFICO (DISPONIBLES VS SOLD OUT) ---
-            df_available = df_filtered[df_filtered['is_available'] == True]
-            df_soldout = df_filtered[df_filtered['is_available'] == False]
-            
-            # Dibujamos las líneas normales solo para los días disponibles
-            fig = px.line(
-                df_available,
-                x="stay_date", y="price", color="name",
-                markers=True, line_shape='spline',
-                title=f"Andamento Prezzi Mercato: {date_range[0].strftime('%d/%m')} – {date_range[1].strftime('%d/%m')}",
-                labels={"stay_date": "Data Soggiorno", "price": "Prezzo (€)", "name": "Competitor"}
-            )
-            fig.update_traces(line=dict(width=2), marker=dict(size=6))
-
-            if not df_soldout.empty:
-                fig.add_scatter(
-                    x=df_soldout['stay_date'],
-                    y=[df_available['price'].min() * 0.92 if not df_available.empty else 0] * len(df_soldout),
-                    mode='markers',
-                    marker=dict(symbol='x', size=10, color=C_NEG, line=dict(width=2)),
-                    name='Sold Out',
-                    text=df_soldout['name'],
-                    hovertemplate="<b>%{text}</b><br>❌ Sold Out"
-                )
-
-            fig.update_layout(
-                **_fig_layout(
-                    hovermode="x unified",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                    yaxis_rangemode='tozero'
-                )
-            )
-            fig.update_xaxes(showgrid=True, gridcolor=_GRID, zeroline=False)
-            fig.update_yaxes(showgrid=True, gridcolor=_GRID)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            with st.expander("Vedi dati grezzi"):
-                st.dataframe(df_filtered[['stay_date', 'name', 'price', 'is_available']].sort_values(['stay_date', 'name']), hide_index=True)
+        pass  # coming soon
     
     with tab_costi:
         st.divider()
