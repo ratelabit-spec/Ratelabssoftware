@@ -1691,6 +1691,7 @@ Obiettivo: [risultato atteso]
         res_props = supabase.table('properties').select('id, kross_unit_id').eq('user_id', USER_ID).execute()
         props_dict = {p['kross_unit_id']: p['id'] for p in res_props.data} if res_props.data else {}
 
+        p_id = None
         if not props_dict:
             st.warning("⚠️ Carica prima le prenotazioni nella tab 'Gestione Dati'.")
         else:
@@ -1705,12 +1706,15 @@ Obiettivo: [risultato atteso]
         st.divider()
 
         # 3. Descarga de datos y cálculo
-        with st.spinner("Calcolando i margini..."):
-            res_res  = supabase.table('reservations').select('*').eq('property_id', p_id).execute()
-            res_fix  = supabase.table('fixed_costs').select('*').eq('property_id', p_id).execute()
-            res_var  = supabase.table('variable_costs').select('*').eq('property_id', p_id).execute()
-            res_util = supabase.table('utility_bills').select('*').eq('property_id', p_id).execute()
-            res_prop = supabase.table('properties').select('cleaning_fee').eq('id', p_id).execute()
+        if p_id is None:
+            st.info("Seleziona una proprietà per visualizzare l'analisi del margine.")
+        if p_id is not None:
+            with st.spinner("Calcolando i margini..."):
+                res_res  = supabase.table('reservations').select('*').eq('property_id', p_id).execute()
+                res_fix  = supabase.table('fixed_costs').select('*').eq('property_id', p_id).execute()
+                res_var  = supabase.table('variable_costs').select('*').eq('property_id', p_id).execute()
+                res_util = supabase.table('utility_bills').select('*').eq('property_id', p_id).execute()
+                res_prop = supabase.table('properties').select('cleaning_fee').eq('id', p_id).execute()
 
             df_res  = pd.DataFrame(res_res.data)  if res_res.data  else pd.DataFrame()
             df_fix  = pd.DataFrame(res_fix.data)  if res_fix.data  else pd.DataFrame(columns=['amount','frequency','valid_to'])
