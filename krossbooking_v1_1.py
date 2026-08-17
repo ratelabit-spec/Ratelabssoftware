@@ -652,10 +652,13 @@ if not df_cloud.empty:
     giorni_mese = fecha_hoy_pd.replace(day=1).replace(month=mes_interes)
     giorni_nel_mese = (giorni_mese + pd.offsets.MonthEnd(0)).day
 
-    # Denominatore reale: tutte le unità registrate, non solo quelle con prenotazioni
+    # Denominatore reale: se filtro attivo usa solo le unità selezionate, altrimenti tutto il portfolio
     total_units_portfolio = load_total_units(USER_ID)
-    unita_cy = total_units_portfolio if total_units_portfolio > 0 else max(df_cy['unit_id'].nunique(), 1)
-    unita_ly = unita_cy  # stesso portafoglio per confronto STLY
+    if apt_sel:
+        unita_cy = len(apt_sel)
+    else:
+        unita_cy = total_units_portfolio if total_units_portfolio > 0 else max(df_cy['unit_id'].nunique(), 1)
+    unita_ly = unita_cy  # stesso sottoinsieme per confronto STLY
 
     capacita_totale_cy = unita_cy * giorni_nel_mese
     capacita_totale_ly = unita_ly * giorni_nel_mese
