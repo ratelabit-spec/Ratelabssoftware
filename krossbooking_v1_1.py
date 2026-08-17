@@ -2228,42 +2228,61 @@ Obiettivo: [risultato atteso]
                 # ── Spese strutturali ──
                 st.caption("**🏛️ Spese Strutturali** — IMU, TARI, assicurazione, affitto…")
                 if not df_fix_c.empty:
-                    _dfs = df_fix_c[['category', 'amount', 'frequency', 'valid_from']].copy()
-                    _dfs.columns = ['Categoria', 'Importo (€)', 'Frequenza', 'Dal']
-                    _dfs['Importo (€)'] = _dfs['Importo (€)'].apply(lambda x: f"€ {x:,.2f}")
-                    _dfs['Frequenza']   = _dfs['Frequenza'].map({'monthly': 'Mensile', 'yearly': 'Annuale'})
-                    _dfs['Dal']         = pd.to_datetime(_dfs['Dal']).dt.strftime('%d/%m/%Y')
-                    st.markdown(_html_table(_dfs, num_cols=[]), unsafe_allow_html=True)
+                    _freq_map = {'monthly': 'Mensile', 'yearly': 'Annuale'}
+                    for _, _r in df_fix_c.iterrows():
+                        _ca, _cb, _cc, _cd = st.columns([2.5, 1.3, 1.1, 0.5])
+                        _ca.markdown(f"**{_r['category']}**")
+                        _cb.caption(f"€ {float(_r['amount']):,.2f}")
+                        _cc.caption(_freq_map.get(_r['frequency'], _r['frequency']))
+                        if _cd.button("🗑️", key=f"del_fix_{_r['id']}", help="Elimina"):
+                            try:
+                                supabase.table('fixed_costs').delete().eq('id', _r['id']).execute()
+                                st.cache_data.clear(); st.rerun()
+                            except Exception as _e:
+                                st.error(f"Errore: {_e}")
                 else:
                     st.info("Nessuna spesa strutturale configurata.")
+
+                st.divider()
 
                 # ── Bollette utenze ──
                 st.caption("**⚡ Bollette Utenze** — ultime 8 inserite (luce, gas, acqua…)")
                 if not df_util_c.empty:
-                    _dfu = df_util_c[['category', 'amount', 'period_from', 'period_to', 'notes']].copy()
-                    _dfu.columns = ['Utenza', 'Importo (€)', 'Dal', 'Al', 'Note']
-                    _dfu['Importo (€)'] = _dfu['Importo (€)'].apply(lambda x: f"€ {x:,.2f}")
-                    _dfu['Dal'] = pd.to_datetime(_dfu['Dal']).dt.strftime('%d/%m/%Y')
-                    _dfu['Al']  = pd.to_datetime(_dfu['Al']).dt.strftime('%d/%m/%Y')
-                    _dfu['Note'] = _dfu['Note'].fillna('—')
-                    st.markdown(_html_table(_dfu, num_cols=[]), unsafe_allow_html=True)
+                    for _, _r in df_util_c.iterrows():
+                        _ca, _cb, _cc, _cd = st.columns([1.4, 1.2, 2.2, 0.5])
+                        _ca.markdown(f"**{_r['category']}**")
+                        _cb.caption(f"€ {float(_r['amount']):,.2f}")
+                        _pf = pd.to_datetime(_r['period_from']).strftime('%d/%m/%y')
+                        _pt = pd.to_datetime(_r['period_to']).strftime('%d/%m/%y')
+                        _cc.caption(f"{_pf} → {_pt}")
+                        if _cd.button("🗑️", key=f"del_util_{_r['id']}", help="Elimina"):
+                            try:
+                                supabase.table('utility_bills').delete().eq('id', _r['id']).execute()
+                                st.cache_data.clear(); st.rerun()
+                            except Exception as _e:
+                                st.error(f"Errore: {_e}")
                 else:
                     st.info("Nessuna bolletta inserita ancora.")
+
+                st.divider()
 
                 # ── Costi operativi per prenotazione ──
                 st.caption("**🔑 Costi per Prenotazione** — pulizie, lavanderia…")
                 if not df_var_c.empty:
-                    _dvs = df_var_c[['cost_type', 'value', 'basis', 'valid_from']].copy()
-                    _dvs['cost_type'] = _dvs['cost_type'].map({k: v.split(' ', 1)[1] for k, v in _VAR_CAT.items()})
-                    _dvs['basis']     = _dvs['basis'].map({
-                        'per_booking': 'per prenotazione',
-                        'per_night':   'per notte',
-                        'per_guest':   'per ospite',
-                    })
-                    _dvs.columns = ['Categoria', 'Importo (€)', 'Si applica', 'Dal']
-                    _dvs['Importo (€)'] = _dvs['Importo (€)'].apply(lambda x: f"€ {x:,.2f}")
-                    _dvs['Dal']         = pd.to_datetime(_dvs['Dal']).dt.strftime('%d/%m/%Y')
-                    st.markdown(_html_table(_dvs, num_cols=[]), unsafe_allow_html=True)
+                    _basis_map = {'per_booking': '/prenotazione', 'per_night': '/notte', 'per_guest': '/ospite'}
+                    for _, _r in df_var_c.iterrows():
+                        _ca, _cb, _cc, _cd = st.columns([2.2, 1.2, 1.4, 0.5])
+                        _label = _VAR_CAT.get(_r['cost_type'], _r['cost_type'])
+                        _label = _label.split(' ', 1)[1] if ' ' in _label else _label
+                        _ca.markdown(f"**{_label}**")
+                        _cb.caption(f"€ {float(_r['value']):,.2f}")
+                        _cc.caption(_basis_map.get(_r['basis'], _r['basis']))
+                        if _cd.button("🗑️", key=f"del_var_{_r['id']}", help="Elimina"):
+                            try:
+                                supabase.table('variable_costs').delete().eq('id', _r['id']).execute()
+                                st.cache_data.clear(); st.rerun()
+                            except Exception as _e:
+                                st.error(f"Errore: {_e}")
                 else:
                     st.info("Nessun costo operativo configurato.")
 
