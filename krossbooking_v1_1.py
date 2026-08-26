@@ -1648,7 +1648,7 @@ Obiettivo: [risultato atteso]
                 
                 with col_calc1:
                     giorni_apertura = st.number_input("Giorni di apertura all'anno", min_value=30, max_value=365, value=365)
-                    los_medio = st.number_input("Estancia Media stimata (LOS)", min_value=1.0, value=3.0, step=0.5)
+                    los_medio = st.number_input("Soggiorno Medio stimato (LOS)", min_value=1.0, value=3.0, step=0.5)
                     
                 with col_calc2:
                     comm_ota = st.number_input("Commissione Media OTA (%)", min_value=0.0, max_value=30.0, value=15.0)
