@@ -1,0 +1,28 @@
+name: Weekly Summary Email
+
+on:
+  schedule:
+    # Lunedì 12:00 UTC = 13:00 Europe/Rome (CET, ora solare).
+    # In ora legale (CEST, mar-ott) equivale alle 14:00 locali — GitHub Actions
+    # non gestisce il DST nel cron. Scostamento di 1h accettato per v1.x.
+    - cron: '0 12 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  send-email:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r scripts/requirements.txt
+
+      - run: python scripts/weekly_summary_email.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ vars.RESEND_FROM_EMAIL }}
