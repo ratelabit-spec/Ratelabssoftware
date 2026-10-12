@@ -6,17 +6,15 @@ import plotly.graph_objects as go
 import datetime
 import math
 from datetime import date
-from supabase import create_client, Client
-import urllib.parse
-import re
-from apify_client import ApifyClient
+from supabase import create_client
 from adapter_krossbooking import load_and_clean_krossbooking
-from adapter_generic import apply_mapping, validate_mapping, FIELD_LABELS, REQUIRED_FIELDS
-from etl_costs import update_or_insert_cost
+from adapter_generic import apply_mapping, validate_mapping, FIELD_LABELS
 from etl_metrics import calculate_property_margins
+from etl_supabase import upsert_reservations
+import db
 
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(page_title="Rate Labs RMS", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Rate Labs", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -213,17 +211,16 @@ if API_KEY:
     genai.configure(api_key=API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
 
-@st.cache_resource
-def init_supabase():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
-
-try:
-    supabase = init_supabase()
-except Exception as e:
-    st.error("⚠️ Configura i segreti di Supabase in .streamlit/secrets.toml")
-    st.stop()
+# Un client per sessione: dopo il login porta il token dell'utente, quindi la RLS filtra per tenant.
+# (Non usare st.cache_resource: condividerebbe la sessione tra utenti diversi.)
+# SUPABASE_KEY deve essere la chiave "anon public", mai la service_role.
+if "supabase" not in st.session_state:
+    try:
+        st.session_state.supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    except Exception:
+        st.error("⚠️ Configura i segreti di Supabase in .streamlit/secrets.toml")
+        st.stop()
+supabase = st.session_state.supabase
 
 # --- COSTANTI ---
 MESI_IT = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
@@ -254,53 +251,16 @@ def _fig_layout(**kw):
 # =====================================================
 
 @st.cache_data
-def load_data_from_supabase(user_id):
+def load_data_from_supabase(tenant_id):
     try:
-        response = supabase.table("reservations").select("*, properties(kross_unit_id)").eq("user_id", user_id).execute()
+        return db.load_reservations(supabase, tenant_id)
     except Exception as e:
         st.error(f"❌ Impossibile connettersi a Supabase: {e}\n\nControlla che l'URL e la chiave in `.streamlit/secrets.toml` siano corretti e che il progetto Supabase esista.")
         st.stop()
 
-    if not response.data:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(response.data)
-
-    df['unit_id'] = df['properties'].apply(
-        lambda x: x['kross_unit_id'] if isinstance(x, dict) and 'kross_unit_id' in x else 'Sconosciuto'
-    )
-
-    for col in ['check_in_date', 'check_out_date', 'booking_date']:
-        df[col] = pd.to_datetime(df[col], errors='coerce')
-
-    numeric_cols = ['gross_revenue', 'commission_amount', 'net_revenue', 'pm_net', 'owner_net', 'nights', 'lead_time']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    return df
-
 @st.cache_data(ttl=3600) # Guarda en caché por 1 hora para no saturar Supabase
-def load_comp_set_data(user_id):
-    # 1. Traer los competidores
-    res_comp = supabase.table("competitors").select("id, name").eq("user_id", user_id).execute()
-    if not res_comp.data:
-        return pd.DataFrame()
-    df_comp = pd.DataFrame(res_comp.data)
-    
-    # 2. Traer los precios de esos competidores
-    comp_ids = df_comp['id'].tolist()
-    res_prices = supabase.table("comp_set_prices").select("*").in_("competitor_id", comp_ids).execute()
-    if not res_prices.data:
-        return pd.DataFrame()
-    df_prices = pd.DataFrame(res_prices.data)
-    
-    # 3. Unir las tablas para tener el nombre del hotel junto al precio
-    df_final = pd.merge(df_prices, df_comp, left_on="competitor_id", right_on="id")
-    df_final['stay_date'] = pd.to_datetime(df_final['stay_date'])
-    df_final.sort_values('stay_date', inplace=True)
-    
-    return df_final
+def load_comp_set_data(tenant_id):
+    return db.load_market_snapshots(supabase, tenant_id)
 
 def calcola_kpi(df_otb, df_otb_ly, df_final_ly):
     k = {}
@@ -331,102 +291,24 @@ def calcola_kpi(df_otb, df_otb_ly, df_final_ly):
 
 
 @st.cache_data(ttl=3600)
-def load_budget(user_id, year, month):
-    res = supabase.table('monthly_budget').select('*') \
-        .eq('user_id', user_id).eq('year', year).eq('month', month).execute()
-    return res.data[0] if res.data else None
+def load_units_by_property(tenant_id):
+    """{nome proprietà: unità vendibili} — denominatore reale per occupancy, RevPAR e Bottom Rate."""
+    props = db.load_properties(supabase, tenant_id)
+    return dict(zip(props['name'], props['units'].astype(int)))
 
 @st.cache_data(ttl=3600)
-def load_budget_year(user_id, year):
-    res = supabase.table('monthly_budget').select('*') \
-        .eq('user_id', user_id).eq('year', year).order('month').execute()
-    return res.data if res.data else []
-
-@st.cache_data(ttl=3600)
-def load_total_units(user_id):
-    """Conta le proprietà registrate — denominatore reale per RevPAR e Bottom Rate."""
-    res = supabase.table('properties').select('id').eq('user_id', user_id).execute()
-    return len(res.data) if res.data else 0
-
-@st.cache_data(ttl=3600)
-def load_portfolio_costs(user_id):
-    """Carica costi fissi, variabili e bollette utenze per il Cervello Matematico."""
-    res_fix  = supabase.table('fixed_costs').select('*').eq('user_id', user_id).is_('valid_to', 'null').execute()
-    res_var  = supabase.table('variable_costs').select('*').eq('user_id', user_id).is_('valid_to', 'null').execute()
-    cutoff   = (pd.Timestamp.now() - pd.DateOffset(months=12)).strftime('%Y-%m-%d')
-    res_util = supabase.table('utility_bills').select('*').eq('user_id', user_id).gte('period_to', cutoff).execute()
-    df_fix  = pd.DataFrame(res_fix.data)  if res_fix.data  else pd.DataFrame(columns=['amount', 'frequency', 'valid_to'])
-    df_var  = pd.DataFrame(res_var.data)  if res_var.data  else pd.DataFrame(columns=['value', 'basis', 'valid_to'])
-    df_util = pd.DataFrame(res_util.data) if res_util.data else pd.DataFrame(columns=['amount', 'period_from', 'period_to'])
+def load_portfolio_costs(tenant_id):
+    """Costi fissi e variabili vigenti + bollette degli ultimi 12 mesi, per il Cervello Matematico."""
+    df_fix, df_var, df_util = db.load_costs(supabase, tenant_id)
+    cutoff = (pd.Timestamp.now() - pd.DateOffset(months=12)).strftime('%Y-%m-%d')
+    df_util = df_util[df_util['period_to'] >= cutoff] if not df_util.empty else df_util
     return df_fix, df_var, df_util
-
-
-def _run_scraper(user_id, target_date):
-    """Esegue lo scraper Apify per tutti i competitor per una data specifica."""
-    apify_token = st.secrets.get("APIFY_API_TOKEN")
-    if not apify_token:
-        st.error("⚠️ APIFY_API_TOKEN non configurato in .streamlit/secrets.toml")
-        return
-
-    res = supabase.table("competitors").select("id, name, booking_url").eq("user_id", user_id).execute()
-    if not res.data:
-        st.warning("Nessun competitor registrato. Aggiungine uno nella sezione 'Gestione Competitor'.")
-        return
-
-    checkin_str  = target_date.strftime('%Y-%m-%d')
-    checkout_str = (target_date + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-
-    hotel_urls, url_map = [], {}
-    for comp in res.data:
-        base_url   = comp['booking_url'].split('?')[0]
-        hotel_path = urllib.parse.urlparse(base_url).path
-        final_url  = (f"{base_url}?checkin={checkin_str}&checkout={checkout_str}"
-                      f"&group_adults=2&no_rooms=1&selected_currency=EUR")
-        hotel_urls.append({"url": final_url, "method": "GET"})
-        url_map[f"{hotel_path}_{checkin_str}"] = {"competitor_id": comp['id'], "stay_date": checkin_str}
-
-    try:
-        apify  = ApifyClient(apify_token)
-        run    = apify.actor("noraview/booking-price-scraper").call(
-            run_input={"hotelUrls": hotel_urls, "includeSoldOut": True, "useApifyProxy": True}
-        )
-        records = []
-        for item in apify.dataset(run["defaultDatasetId"]).iterate_items():
-            parsed      = urllib.parse.urlparse(item.get("url", ""))
-            params      = urllib.parse.parse_qs(parsed.query)
-            checkin_ret = params.get("checkin", [None])[0]
-            meta        = url_map.get(f"{parsed.path}_{checkin_ret}")
-            if not meta:
-                continue
-            raw   = item.get("priceAmount") or item.get("price")
-            price = 0.0
-            if raw:
-                try:
-                    nums  = re.findall(r"[-+]?\d*\.\d+|\d+", str(raw).replace(",", "."))
-                    price = float(nums[0]) if nums else 0.0
-                except Exception:
-                    pass
-            records.append({
-                "competitor_id": meta["competitor_id"],
-                "stay_date":     meta["stay_date"],
-                "price":         price,
-                "is_available":  price > 0,
-            })
-
-        if records:
-            supabase.table("comp_set_prices").upsert(records, on_conflict="competitor_id, stay_date").execute()
-            st.cache_data.clear()
-            st.success(f"✅ {len(records)} prezzi aggiornati per il {checkin_str}.")
-        else:
-            st.warning("⚠️ Nessun prezzo trovato — Booking potrebbe aver cambiato struttura.")
-    except Exception as e:
-        st.error(f"Errore scraper: {e}")
 
 
 def show_login_page():
     _, col, _ = st.columns([1, 2, 1])
     with col:
-        st.markdown("# 📊 Rate Labs RMS")
+        st.markdown("# 📊 Rate Labs")
         st.markdown("### Accesso")
         email = st.text_input("Email", placeholder="nome@email.com")
         password = st.text_input("Password", type="password")
@@ -481,7 +363,7 @@ def calcola_pace(df_cy_attive, df_ly_attive, mes, anio_cy, fecha_hoy_pd, fecha_s
 
 def _html_table(df: pd.DataFrame, num_cols=None, delta_cols=None,
                 fmt=None, color_fn=None) -> str:
-    """Renders a DataFrame as a styled HTML table (Rate Labs RMS style)."""
+    """Renders a DataFrame as a styled HTML table (Rate Labs style)."""
     num_cols   = set(num_cols or [])
     delta_cols = set(delta_cols or [])
     fmt        = fmt or {}
@@ -554,6 +436,103 @@ def calcola_pickup(df_cy, df_ly, mes, data_oggi, data_stly, finestre=(7, 14, 30)
         })
     return pd.DataFrame(righe)
 
+def render_upload_section(tenant_id, user_id, key):
+    """Upload prenotazioni (KrossBooking o PMS generico con mapping salvato). Usato in tab Dati e onboarding."""
+    pms_mode = st.radio("Seleziona il tuo PMS:", ["KrossBooking", "Altro PMS"], horizontal=True, key=f"{key}_pms_mode")
+
+    def _sync(df_total, file_name, source_mapping_id=None, rows_total=None):
+        bar = st.progress(0, text="Caricamento in corso...")
+        return upsert_reservations(
+            supabase, df_total, tenant_id, user_id,
+            file_name=file_name, source_mapping_id=source_mapping_id, rows_total=rows_total,
+            on_progress=lambda i, n: bar.progress(i / n, text=f"Lotto {i}/{n} caricato..."),
+        )
+
+    # ── Flusso A — KrossBooking ──
+    if pms_mode == "KrossBooking":
+        st.info("Carica l'ultimo export di KrossBooking. Il sistema aggiungerà le nuove prenotazioni e aggiornerà quelle modificate.")
+        file_upload = st.file_uploader("📂 Carica file Excel KrossBooking", type=['xlsx'], key=f"{key}_file_kb")
+        if file_upload and st.button("🚀 Sincronizza nel Cloud", type="primary", key=f"{key}_sync_kb"):
+            with st.spinner("Analisi e caricamento in corso..."):
+                df_limpio, df_cancellate = load_and_clean_krossbooking(file_upload)
+                dfs = [d for d in [df_limpio, df_cancellate] if d is not None and not d.empty]
+                if not dfs:
+                    st.warning("Il file caricato non contiene dati validi.")
+                    return
+                df_total = pd.concat(dfs, ignore_index=True)
+                df_total['pms_reservation_id'] = df_total['id'].astype(str)
+                try:
+                    n = _sync(df_total, file_upload.name)
+                    st.cache_data.clear()
+                    st.success(f"✅ Sincronizzazione completata! ({n} record analizzati, incluse cancellazioni).")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore durante l'aggiornamento: {e}")
+        return
+
+    # ── Flusso B — Altro PMS (parser generico con mapping salvato) ──
+    st.info("Carica un export Excel da qualsiasi PMS. La prima volta configurerai il mapping delle colonne — verrà salvato per i prossimi upload.")
+    pms_name = st.text_input("Nome PMS (es. Mews, Opera, Beds24, ecc.)", placeholder="Il tuo PMS", key=f"{key}_pms_name")
+    file_upload_gen = st.file_uploader("📂 Carica file Excel", type=['xlsx', 'xls'], key=f"{key}_file_gen")
+
+    if file_upload_gen and not pms_name:
+        st.warning("Inserisci il nome del PMS per salvare il mapping.")
+        return
+    if not file_upload_gen:
+        return
+
+    df_raw = pd.read_excel(file_upload_gen)
+    opts = ["(Non mappare)"] + list(df_raw.columns.astype(str))
+
+    saved = db.load_source_mapping(supabase, tenant_id, pms_name)
+    saved_mapping = saved['mapping'] if saved else {}
+
+    if saved_mapping:
+        st.success(f"✅ Mapping '{pms_name}' trovato — precompilato. Verifica e conferma.")
+    else:
+        st.warning("Nessun mapping salvato per questo PMS. Configura le colonne qui sotto.")
+
+    with st.expander("🗺️ Configura Mapping Colonne", expanded=not bool(saved_mapping)):
+        new_mapping = {}
+        col_a, col_b = st.columns(2)
+        for idx, (field, label) in enumerate(FIELD_LABELS.items()):
+            container = col_a if idx % 2 == 0 else col_b
+            saved_val = saved_mapping.get(field, "(Non mappare)")
+            default_idx = opts.index(saved_val) if saved_val in opts else 0
+            chosen = container.selectbox(label, opts, index=default_idx, key=f"{key}_gmap_{field}")
+            new_mapping[field] = chosen if chosen != "(Non mappare)" else None
+
+    errors = validate_mapping(new_mapping)
+    for e in errors:
+        st.error(e)
+    if errors:
+        return
+
+    col_prev, col_load = st.columns(2)
+    if col_prev.button("👁️ Anteprima (prime 5 righe)", key=f"{key}_preview"):
+        try:
+            df_norm = apply_mapping(df_raw, new_mapping)
+            st.dataframe(df_norm.head(5), use_container_width=True)
+            st.caption(f"{len(df_norm)} prenotazioni valide trovate nel file.")
+        except Exception as e:
+            st.error(f"Errore nell'anteprima: {e}")
+
+    if col_load.button("🚀 Carica & Salva Mapping", type="primary", key=f"{key}_load_gen"):
+        with st.spinner("Normalizzazione e caricamento in corso..."):
+            try:
+                mapping_id = db.save_source_mapping(supabase, tenant_id, pms_name, new_mapping)
+                df_norm = apply_mapping(df_raw, new_mapping)
+                if df_norm.empty:
+                    st.warning("Nessuna prenotazione valida trovata dopo la normalizzazione. Verifica il mapping.")
+                else:
+                    n = _sync(df_norm, file_upload_gen.name, mapping_id, len(df_raw))
+                    st.cache_data.clear()
+                    st.success(f"✅ {n} prenotazioni caricate da '{pms_name}'. Mapping salvato per i prossimi upload.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Errore: {e}")
+
+
 # =====================================================
 # AUTENTICAZIONE
 # =====================================================
@@ -563,11 +542,23 @@ if not st.session_state.get("user_id"):
 
 USER_ID = st.session_state.user_id
 
+if "tenants" not in st.session_state:
+    st.session_state.tenants = db.load_user_tenants(supabase, USER_ID)
+if not st.session_state.tenants:
+    st.error("⚠️ Il tuo utente non è associato a nessun cliente (tenant). Contatta l'amministratore.")
+    st.stop()
+
 # =====================================================
 # SIDEBAR
 # =====================================================
 
 st.sidebar.title("⚙️ Impostazioni")
+
+_tenants = st.session_state.tenants
+_tenant_idx = 0
+if len(_tenants) > 1:
+    _tenant_idx = st.sidebar.selectbox("🏢 Cliente:", range(len(_tenants)), format_func=lambda i: _tenants[i]['name'])
+TENANT_ID = _tenants[_tenant_idx]['tenant_id']
 
 tipo_struttura = st.sidebar.selectbox(
     "🏨 Tipo struttura:",
@@ -593,18 +584,19 @@ st.sidebar.success("🟢 Connesso al Cloud (Supabase)")
 st.sidebar.caption(f"👤 {st.session_state.get('user_email', '')}")
 if st.sidebar.button("🚪 Esci", use_container_width=True):
     supabase.auth.sign_out()
-    st.session_state.pop("user_id", None)
-    st.session_state.pop("user_email", None)
+    for _k in ("user_id", "user_email", "tenants", "supabase"):
+        st.session_state.pop(_k, None)
+    st.cache_data.clear()
     st.rerun()
 
 # =====================================================
 # MAIN
 # =====================================================
 
-st.title("📊 Rate Labs RMS")
+st.title("📊 Rate Labs")
 
 with st.spinner('Sincronizzazione con il database in corso...'):
-    df_cloud = load_data_from_supabase(USER_ID)
+    df_cloud = load_data_from_supabase(TENANT_ID)
 
 if not df_cloud.empty:
     anio_actual = fecha_hoy_pd.year
@@ -627,9 +619,9 @@ if not df_cloud.empty:
         txt_filtro = "Intero Portafoglio"
 
     # --- GESTIONE STATUS & CANCELLAZIONI ---
-    # Convertimos a string, quitamos espacios ocultos, pasamos a minúsculas y buscamos "cancel"
-    mask_canc_cy = df_cy['status'].astype(str).str.strip().str.lower().str.contains('cancel', na=False)
-    mask_canc_ly = df_ly['status'].astype(str).str.strip().str.lower().str.contains('cancel', na=False)
+    # is_cancelled viene calcolato in fase di caricamento (stato "cancel*" o data di cancellazione presente)
+    mask_canc_cy = df_cy['is_cancelled'].fillna(False).astype(bool)
+    mask_canc_ly = df_ly['is_cancelled'].fillna(False).astype(bool)
     # Separamos reservas activas de las canceladas
     df_cy_attive = df_cy[~mask_canc_cy]
     df_cy_canc   = df_cy[mask_canc_cy]
@@ -653,9 +645,10 @@ if not df_cloud.empty:
     giorni_nel_mese = (giorni_mese + pd.offsets.MonthEnd(0)).day
 
     # Denominatore reale: se filtro attivo usa solo le unità selezionate, altrimenti tutto il portfolio
-    total_units_portfolio = load_total_units(USER_ID)
+    units_by_property = load_units_by_property(TENANT_ID)
+    total_units_portfolio = sum(units_by_property.values())
     if apt_sel:
-        unita_cy = len(apt_sel)
+        unita_cy = sum(units_by_property.get(a, 1) for a in apt_sel)
     else:
         unita_cy = total_units_portfolio if total_units_portfolio > 0 else max(df_cy['unit_id'].nunique(), 1)
     unita_ly = unita_cy  # stesso sottoinsieme per confronto STLY
@@ -685,7 +678,7 @@ if not df_cloud.empty:
     # =====================================================
     # CERVELLO MATEMATICO — BOTTOM RATE
     # =====================================================
-    df_fix_portfolio, df_var_portfolio, df_util_portfolio = load_portfolio_costs(USER_ID)
+    df_fix_portfolio, df_var_portfolio, df_util_portfolio = load_portfolio_costs(TENANT_ID)
     costos_configurados = not df_fix_portfolio.empty or not df_var_portfolio.empty or not df_util_portfolio.empty
 
     bottom_rate = 0.0
@@ -727,7 +720,7 @@ if not df_cloud.empty:
     # =====================================================
     # COMP SET — caricato qui per renderlo disponibile all'IA
     # =====================================================
-    df_market = load_comp_set_data(USER_ID)
+    df_market = load_comp_set_data(TENANT_ID)
 
     # =====================================================
     # PANORAMICA ANNUALE — sempre visibile all'apertura
@@ -873,8 +866,8 @@ if not df_cloud.empty:
     st.divider()
     st.caption(f"🔍 Analisi mensile — **{mes_nombre}** | OTB al **{fecha_hoy.strftime('%d/%m/%Y')}** | {lbl_portf}: **{unita_cy} {lbl_unita}**")
 
-    tab_revenue, tab_costi, tab_mercato, tab_strategia, tab_dati = st.tabs([
-        "📊 Revenue", "💰 Costi & Margini", "🕵️ Mercato", "💡 Strategia", "⚙️ Dati"
+    tab_revenue, tab_costi, tab_strategia, tab_dati = st.tabs([
+        "📊 Revenue", "💰 Costi & Margini", "💡 Strategia", "⚙️ Dati"
     ])
 
     with tab_revenue:
@@ -1078,7 +1071,7 @@ if not df_cloud.empty:
                 f"\n📊 MERCATO: prezzo medio competitor €{avg_comp:.0f}/notte per {mes_nombre}. "
                 f"{n_soldout} competitor già sold out."
             )
-    _prompt_ia = f"""Sei il Cervello Strategico di un sistema professionale di Revenue Management.
+    _prompt_ia = f"""Sei il Cervello Strategico di Rate Labs, uno strumento di diagnosi revenue (non un RMS: il prezzo giornaliero lo gestisce il PMS/RMS del cliente).
 Oggi: {fecha_hoy.strftime('%d/%m/%Y')} | Portfolio: {txt_filtro} | Mese analizzato: {mes_nombre}
 
 {_sezione_br}
@@ -1089,21 +1082,16 @@ Oggi: {fecha_hoy.strftime('%d/%m/%Y')} | Portfolio: {txt_filtro} | Mese analizza
 • LOS: {k['los']:.1f} notti | Lead Time: {k['lt']:.0f}gg (chiusura STLY: {k['lt_ly_final']:.0f}gg)
 • Cancellazioni: {pct_canc:.1f}% | Pickup 7gg: {pickup_7_cy} pren. ({pickup_7_cy - pickup_7_ly:+d} vs STLY){_sezione_comp}
 
-Genera un report STRUTTURATO con esattamente questo formato (max 300 parole totali):
+REGOLE:
+- Usa SOLO i dati qui sopra. Non inventare cause che i dati non mostrano.
+- Proponi UNA sola leva, scelta tra: Posizionamento, Vetrina (listing), Scheda e condizioni, Redditività.
+- Non proporre un prezzo giornaliero e mai nulla sotto il Bottom Rate.
 
-🟢 SCENARIO CONSERVATIVO
-Azione: [cosa fare concretamente sul channel manager]
-Obiettivo: [risultato atteso in termini di RevPAR, ADR o occupazione]
+Rispondi con esattamente questo formato (max 200 parole):
 
-🟡 SCENARIO MODERATO
-Azione: [cosa fare concretamente]
-Obiettivo: [risultato atteso]
-
-🔴 SCENARIO AGGRESSIVO
-Azione: [cosa fare concretamente]
-Obiettivo: [risultato atteso]
-
-💡 DIAGNOSI (2 righe max): Motivazione principale della strategia basata sui dati OTB e di mercato.
+🔎 DIAGNOSI: [il problema è di prezzo, posizionamento, restrizioni o margine — e perché, in 2 righe]
+🎯 LEVA: [una sola azione concreta]
+📏 METRICA DA MONITORARE: [quale KPI dovrebbe muoversi e in quale finestra di tempo]
 """
 
     with tab_revenue:
@@ -1423,40 +1411,6 @@ Obiettivo: [risultato atteso]
                     f"Gap di {gap:.1f} punti percentuali — considera di spingere il canale più profittevole."
                 )
 
-    with tab_mercato:
-        st.divider()
-        st.markdown("""
-        <div style="
-            text-align:center;
-            padding: 3rem 2rem;
-            background: linear-gradient(135deg, #F1F5F9 0%, #E2E8F0 100%);
-            border-radius: 16px;
-            border: 1.5px dashed #94A3B8;
-            margin: 2rem 0;
-        ">
-            <div style="font-size: 3rem; margin-bottom: 0.75rem;">🚧</div>
-            <h2 style="color: #1E293B; font-size: 1.5rem; margin: 0 0 0.5rem 0;">Analisi di Mercato — In Arrivo</h2>
-            <p style="color: #64748B; font-size: 0.95rem; max-width: 480px; margin: 0 auto 1.25rem auto;">
-                Il monitoraggio dei prezzi dei competitor su Booking.com sarà disponibile nella prossima versione.
-                Potrai confrontare le tue tariffe con il mercato in tempo reale.
-            </p>
-            <div style="
-                display: inline-block;
-                background: #1E6FD9;
-                color: white;
-                padding: 0.35rem 1rem;
-                border-radius: 999px;
-                font-size: 0.78rem;
-                font-weight: 600;
-                letter-spacing: 0.05em;
-                text-transform: uppercase;
-            ">Prossimamente</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with tab_mercato:
-        pass  # coming soon
-
     with tab_revenue:
         st.divider()
         st.subheader("📅 Segmentazione Weekday / Weekend")
@@ -1524,10 +1478,9 @@ Obiettivo: [risultato atteso]
 
     with tab_revenue:
         st.divider()
-        st.subheader(f"🎯 Forecast & Budget — {mes_nombre}")
+        st.subheader(f"🎯 Forecast — {mes_nombre}")
 
         rev_stly_final  = df_ly_final['gross_revenue'].sum() if not df_ly_final.empty else 0
-        notti_stly_final = df_ly_final['nights'].sum() if not df_ly_final.empty else 0
         rev_cy_otb      = k['rev']
         notti_cy_otb    = k['notti']
 
@@ -1538,56 +1491,25 @@ Obiettivo: [risultato atteso]
         rev_forecast = rev_cy_otb / curve_pct
         occ_forecast = (notti_cy_otb / curve_pct) / capacita_totale_cy * 100 if capacita_totale_cy > 0 else 0
 
-        # ── Budget ──
-        anno_sel = fecha_hoy_pd.year
-        budget   = load_budget(USER_ID, anno_sel, mes_interes)
-        bud_rev  = float(budget['target_revenue'])   if budget else None
-        bud_occ  = float(budget['target_occupancy']) if budget else None
-        bud_adr  = float(budget['target_adr'])       if budget else None
-
-        # ── Metriche confronto ──
         c1, c2, c3 = st.columns(3)
-        c1.metric("📈 Forecast Ricavi",   f"€{rev_forecast:,.0f}",
-                  f"vs Budget: €{bud_rev:,.0f} ({(rev_forecast/bud_rev-1)*100:+.1f}%)" if bud_rev else "Budget non impostato")
-        c2.metric("📊 Forecast Occupancy", f"{occ_forecast:.1f}%",
-                  f"vs Budget: {bud_occ:.1f}%" if bud_occ else "Budget non impostato")
-        c3.metric("🏷️ ADR attuale",        f"€{k['adr']:,.2f}",
-                  f"vs Budget ADR: €{bud_adr:,.2f}" if bud_adr else "Budget non impostato")
+        c1.metric("📈 Forecast Ricavi",    f"€{rev_forecast:,.0f}",
+                  f"{(rev_forecast / rev_stly_final - 1) * 100:+.1f}% vs chiusura STLY" if rev_stly_final > 0 else "—")
+        c2.metric("📊 Forecast Occupancy", f"{occ_forecast:.1f}%")
+        c3.metric("🏷️ ADR attuale",        f"€{k['adr']:,.2f}")
 
         st.caption(f"Forecast basato sulla booking curve STLY: a questo punto dell'anno, lo STLY aveva il **{curve_pct*100:.0f}%** del totale già prenotato.")
 
-        # ── Progress bar vs STLY e Budget ──
-        col_p1, col_p2 = st.columns(2)
-        with col_p1:
-            pct_stly = (rev_cy_otb / rev_stly_final * 100) if rev_stly_final > 0 else 0
-            st.markdown(f"**OTB vs Chiusura STLY:** {pct_stly:.1f}%")
-            st.progress(min(pct_stly / 100, 1.0))
-        with col_p2:
-            if bud_rev:
-                pct_bud = rev_forecast / bud_rev * 100
-                color_label = "🟢" if pct_bud >= 95 else ("🟡" if pct_bud >= 80 else "🔴")
-                st.markdown(f"**Forecast vs Budget:** {color_label} {pct_bud:.1f}%")
-                st.progress(min(pct_bud / 100, 1.0))
-            else:
-                st.info("Imposta il budget mensile in ⚙️ Dati → Budget per vedere il confronto.")
-
-        # ── Insight ──
-        if bud_rev and rev_forecast < bud_rev * 0.85:
-            gap = bud_rev - rev_forecast
-            st.error(f"⚠️ **Gap Budget:** Il forecast indica un potenziale shortfall di **€{gap:,.0f}**. Considera azioni di yield o promozioni mirate.")
-        elif bud_rev and rev_forecast >= bud_rev:
-            st.success(f"✅ **Budget on track:** Il forecast supera il target di €{rev_forecast - bud_rev:,.0f}. Valuta di alzare i prezzi per massimizzare il margine.")
-    
-    with tab_mercato:
-        pass  # coming soon
+        pct_stly = (rev_cy_otb / rev_stly_final * 100) if rev_stly_final > 0 else 0
+        st.markdown(f"**OTB vs Chiusura STLY:** {pct_stly:.1f}%")
+        st.progress(min(pct_stly / 100, 1.0))
     
     with tab_costi:
         st.divider()
         st.header("💰 Analisi Margine Netto (Netto PM)")
 
         # 1. Recuperar propiedades del usuario
-        res_props = supabase.table('properties').select('id, kross_unit_id').eq('user_id', USER_ID).execute()
-        props_dict = {p['kross_unit_id']: p['id'] for p in res_props.data} if res_props.data else {}
+        _props = db.load_properties(supabase, TENANT_ID)
+        props_dict = dict(zip(_props['name'], _props['id']))
 
         p_id = None
         if not props_dict:
@@ -1608,19 +1530,13 @@ Obiettivo: [risultato atteso]
             st.info("Seleziona una proprietà per visualizzare l'analisi del margine.")
         if p_id is not None:
             with st.spinner("Calcolando i margini..."):
-                res_res  = supabase.table('reservations').select('*').eq('property_id', p_id).execute()
-                res_fix  = supabase.table('fixed_costs').select('*').eq('property_id', p_id).execute()
-                res_var  = supabase.table('variable_costs').select('*').eq('property_id', p_id).execute()
-                res_util = supabase.table('utility_bills').select('*').eq('property_id', p_id).execute()
-                res_prop = supabase.table('properties').select('cleaning_fee').eq('id', p_id).execute()
-
-            df_res  = pd.DataFrame(res_res.data)  if res_res.data  else pd.DataFrame()
-            df_fix  = pd.DataFrame(res_fix.data)  if res_fix.data  else pd.DataFrame(columns=['amount','frequency','valid_to'])
-            df_var  = pd.DataFrame(res_var.data)  if res_var.data  else pd.DataFrame(columns=['value','basis','valid_to'])
-            df_util = pd.DataFrame(res_util.data) if res_util.data else pd.DataFrame(columns=['amount','period_from','period_to','category'])
-            cleaning_fee_prop = float(res_prop.data[0].get('cleaning_fee') or 0) if res_prop.data else 0.0
+                df_res = db.load_reservations(supabase, TENANT_ID, property_id=p_id)
+                df_fix, df_var, df_util = db.load_costs(supabase, TENANT_ID, property_id=p_id)
+                _settings = db.load_current_settings(supabase, TENANT_ID, p_id)
+            cleaning_fee_prop = float(_settings.get('cleaning_fee') or 0) if _settings else 0.0
 
             if not df_res.empty:
+                df_res = df_res[~df_res['is_cancelled']]
                 fatturato, ota, variabili, fissi, netto = calculate_property_margins(df_res, df_fix, df_var, anno, df_util, cleaning_fee_prop)
 
                 if not df_var.empty and (df_var['basis'] == 'per_guest').any():
@@ -1708,7 +1624,7 @@ Obiettivo: [risultato atteso]
 
     with tab_strategia:
         st.subheader(f"📅 Calendario Occupancy — {mes_nombre}")
-        st.caption("Heatmap degli arrivi per giorno del mese. Aiuta a identificare date deboli dove intervenire con i prezzi.")
+        st.caption("Heatmap degli arrivi per giorno del mese. Aiuta a identificare le date deboli.")
 
         first_of_month = pd.Timestamp(fecha_hoy_pd.year, mes_interes, 1)
         first_dow = first_of_month.dayofweek  # 0=Lun
@@ -1723,14 +1639,6 @@ Obiettivo: [risultato atteso]
         else:
             arr = pd.DataFrame(columns=['day', 'n_arr', 'rev'])
 
-        # Price suggestions per il mese selezionato
-        try:
-            sug_res = supabase.table('price_suggestions').select('date_from, date_to, suggested_price, status, scenario') \
-                .eq('user_id', USER_ID).in_('status', ['pending', 'approved']).execute()
-            df_sug = pd.DataFrame(sug_res.data) if sug_res.data else pd.DataFrame()
-        except Exception:
-            df_sug = pd.DataFrame()
-
         # Costruisco griglia calendario 7×6
         DAYS_IT = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom']
         n_weeks = math.ceil((giorni_nel_mese + first_dow) / 7)
@@ -1744,20 +1652,7 @@ Obiettivo: [risultato atteso]
             n = int(arr_row['n_arr'].iloc[0]) if not arr_row.empty else 0
             occ = min(n / unita_cy * 100, 100) if unita_cy > 0 else 0
             z[dow][week] = occ
-
-            d_ts = pd.Timestamp(fecha_hoy_pd.year, mes_interes, day_num)
-            sug_price = None
-            if not df_sug.empty:
-                mask = (pd.to_datetime(df_sug['date_from']) <= d_ts) & (pd.to_datetime(df_sug['date_to']) >= d_ts)
-                sug_match = df_sug[mask]
-                if not sug_match.empty:
-                    sug_price = sug_match.iloc[0]['suggested_price']
-                    status_icon = "✅" if sug_match.iloc[0]['status'] == 'approved' else "⏳"
-
-            cell = f"<b>{day_num}</b><br>{occ:.0f}% occ"
-            if sug_price:
-                cell += f"<br>{status_icon}€{sug_price:.0f}"
-            text[dow][week] = cell
+            text[dow][week] = f"<b>{day_num}</b><br>{occ:.0f}% occ"
 
         colorscale = [[0.0, '#FEE2E2'], [0.4, '#FEF3C7'], [0.7, '#D1FAE5'], [1.0, '#059669']]
         fig_cal = go.Figure(go.Heatmap(
@@ -1792,7 +1687,7 @@ Obiettivo: [risultato atteso]
             if (arr[arr['day']==d]['n_arr'].values[0] if not arr[arr['day']==d].empty else 0) / max(unita_cy,1) < 0.5
         )
         if days_below_50 > 0:
-            st.warning(f"⚠️ **{days_below_50} giorni** con occupancy stimata sotto il 50% — considera suggerimenti prezzi per quelle date.")
+            st.warning(f"⚠️ **{days_below_50} giorni** con occupancy stimata sotto il 50%.")
 
         st.divider()
 
@@ -1813,271 +1708,13 @@ Obiettivo: [risultato atteso]
                     except Exception as e:
                         st.error(f"Errore IA: {e}")
 
-    with tab_strategia:
-        st.divider()
-        st.subheader("💡 Suggerimenti Prezzi — Human-in-the-Loop")
-        st.caption("Genera suggerimenti basati sul Bottom Rate, approva o rifiuta con un clic. In Fase B il prezzo verrà inviato automaticamente al PMS.")
-
-        MARGINI = {"Conservativo": 1.20, "Moderato": 1.35, "Aggressivo": 1.50}
-
-        # --- SEZIONE 1: GENERA SUGGERIMENTO ---
-        st.markdown("### 📝 Genera Nuovo Suggerimento")
-        with st.form("form_suggerimento"):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                apt_sug = st.selectbox("Appartamento", tutti_apt)
-            with c2:
-                data_da = st.date_input("Dal", value=date.today())
-                data_a  = st.date_input("Al",  value=date.today() + datetime.timedelta(days=6))
-            with c3:
-                scenario_sug   = st.selectbox("Scenario", list(MARGINI.keys()))
-                prezzo_attuale = st.number_input("Prezzo attuale (€/notte)", min_value=0.0, step=5.0,
-                                                 value=round(float(k['adr']), 0) if k['adr'] > 0 else 80.0)
-
-            margine = MARGINI[scenario_sug]
-            if bottom_rate > 0:
-                prezzo_suggerito = round(max(bottom_rate * margine, prezzo_attuale), 0)
-                br_label = f"Bottom Rate €{bottom_rate:.0f} × {margine:.2f}"
-            else:
-                prezzo_suggerito = round(prezzo_attuale * margine, 0)
-                br_label = "⚠️ Bottom Rate non configurato — moltiplicatore sul prezzo attuale"
-
-            comp_ctx = ""
-            if not df_market.empty:
-                mask_d = (df_market['stay_date'] >= pd.Timestamp(data_da)) & (df_market['stay_date'] <= pd.Timestamp(data_a))
-                comp_avg_sug = df_market[mask_d]['price'].mean() if not df_market[mask_d].empty else None
-                if comp_avg_sug:
-                    comp_ctx = f" | 🕵️ Mercato: €{comp_avg_sug:.0f}/notte"
-
-            st.info(f"💰 **Prezzo suggerito: €{prezzo_suggerito:.0f}/notte** | {br_label}{comp_ctx}")
-            motivo_sug = st.text_area("Note / Motivazione (opzionale)", placeholder="Es: Weekend lungo, alta domanda prevista...")
-            submitted_sug = st.form_submit_button("💾 Salva Suggerimento", use_container_width=True, type="primary")
-
-            if submitted_sug:
-                if data_a <= data_da:
-                    st.error("La data di fine deve essere successiva alla data di inizio.")
-                else:
-                    try:
-                        supabase.table('price_suggestions').insert({
-                            "user_id":              USER_ID,
-                            "property_name":        apt_sug,
-                            "date_from":            str(data_da),
-                            "date_to":              str(data_a),
-                            "current_price":        float(prezzo_attuale),
-                            "suggested_price":      float(prezzo_suggerito),
-                            "scenario":             scenario_sug,
-                            "reason":               motivo_sug or f"Scenario {scenario_sug} — {int((margine-1)*100)}% margine su Bottom Rate",
-                            "bottom_rate_snapshot": float(bottom_rate),
-                            "status":               "pending"
-                        }).execute()
-                        st.success("✅ Suggerimento salvato!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore nel salvataggio: {e}")
-
-        st.divider()
-
-        # --- SEZIONE 2: IN ATTESA DI DECISIONE ---
-        st.markdown("### ⏳ In Attesa di Decisione")
-        try:
-            res_pending = supabase.table('price_suggestions').select('*') \
-                .eq('user_id', USER_ID).eq('status', 'pending') \
-                .order('created_at', desc=True).execute()
-        except Exception as e:
-            st.error(f"Errore caricamento suggerimenti: {e}")
-            res_pending = None
-
-        if res_pending and res_pending.data:
-            for sug in res_pending.data:
-                with st.container(border=True):
-                    ca, cb, cc, cd, ce, cf = st.columns([2.5, 2, 1, 1, 1, 1])
-                    ca.markdown(f"**{sug['property_name']}**  \n📅 {sug['date_from']} → {sug['date_to']}")
-                    reason_short = (sug['reason'][:45] + '…') if sug.get('reason') and len(sug['reason']) > 45 else sug.get('reason', '')
-                    cb.markdown(f"*{sug['scenario']}*  \n{reason_short}")
-                    cc.metric("Attuale", f"€{sug['current_price']:.0f}")
-                    delta_pct = f"{((sug['suggested_price']/sug['current_price'])-1)*100:+.0f}%" if sug.get('current_price', 0) > 0 else ""
-                    cd.metric("Suggerito", f"€{sug['suggested_price']:.0f}", delta_pct)
-                    if ce.button("✅ Approva", key=f"app_{sug['id']}", use_container_width=True, type="primary"):
-                        supabase.table('price_suggestions').update({
-                            "status": "approved",
-                            "decided_at": datetime.datetime.utcnow().isoformat()
-                        }).eq('id', sug['id']).execute()
-                        st.rerun()
-                    if cf.button("❌ Rifiuta", key=f"rif_{sug['id']}", use_container_width=True):
-                        supabase.table('price_suggestions').update({
-                            "status": "rejected",
-                            "decided_at": datetime.datetime.utcnow().isoformat()
-                        }).eq('id', sug['id']).execute()
-                        st.rerun()
-        else:
-            st.info("Nessun suggerimento in attesa. Generane uno nuovo dalla sezione sopra.")
-
-        st.divider()
-
-        # --- SEZIONE 3: STORICO DECISIONI ---
-        with st.expander("📋 Storico Decisioni", expanded=False):
-            try:
-                res_hist = supabase.table('price_suggestions').select('*') \
-                    .eq('user_id', USER_ID).neq('status', 'pending') \
-                    .order('decided_at', desc=True).limit(50).execute()
-            except Exception:
-                res_hist = None
-            if res_hist and res_hist.data:
-                df_hist = pd.DataFrame(res_hist.data)[
-                    ['property_name', 'date_from', 'date_to', 'scenario',
-                     'current_price', 'suggested_price', 'status', 'decided_at']
-                ]
-                df_hist.columns = ['Proprietà', 'Dal', 'Al', 'Scenario', 'Att. (€)', 'Sug. (€)', 'Decisione', 'Deciso il']
-                df_hist['Decisione'] = df_hist['Decisione'].map({'approved': '✅ Approvato', 'rejected': '❌ Rifiutato'})
-                df_hist['Deciso il'] = pd.to_datetime(df_hist['Deciso il']).dt.strftime('%d/%m/%Y %H:%M')
-                st.dataframe(df_hist, use_container_width=True, hide_index=True)
-            else:
-                st.info("Nessuna decisione ancora registrata.")
-
     with tab_dati:
         st.header("⚙️ Gestione Dati")
         
         # --- SEZIONE 1: SINCRONIZZAZIONE PRENOTAZIONI ---
         st.subheader("☁️ Aggiorna il Database")
 
-        pms_mode = st.radio("Seleziona il tuo PMS:", ["KrossBooking", "Altro PMS"], horizontal=True)
-
-        # ── Helper: upsert normalizzato (condiviso da entrambi i flussi) ──
-        def _upsert_reservations(df_total):
-            unique_props = df_total['unit_id'].dropna().unique()
-            prop_map = {}
-            for prop_name in unique_props:
-                res = supabase.table('properties').upsert(
-                    {"user_id": USER_ID, "kross_unit_id": prop_name},
-                    on_conflict='user_id, kross_unit_id'
-                ).execute()
-                prop_map[prop_name] = res.data[0]['id']
-
-            records = []
-            for _, row in df_total.iterrows():
-                records.append({
-                    "user_id":             USER_ID,
-                    "property_id":         prop_map.get(row['unit_id']),
-                    "pms_reservation_id":  str(row['pms_reservation_id']),
-                    "check_in_date":       row['check_in_date'].strftime('%Y-%m-%d') if pd.notnull(row['check_in_date']) else None,
-                    "check_out_date":      row['check_out_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('check_out_date')) else None,
-                    "booking_date":        row['booking_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('booking_date')) else None,
-                    "gross_revenue":       float(row['gross_revenue']),
-                    "commission_amount":   float(row['commission_amount']),
-                    "net_revenue":         float(row['net_revenue']),
-                    "pm_net":              float(row['pm_net']),
-                    "owner_net":           float(row['owner_net']),
-                    "nights":              int(row['nights']),
-                    "lead_time":           int(row['lead_time']),
-                    "status":              str(row['status']),
-                    "channel":             str(row.get('channel', '') or ''),
-                    "channel_group":       str(row['channel_group']) if pd.notnull(row.get('channel_group')) else 'Altro',
-                })
-
-            chunk_size = 500
-            total_chunks = math.ceil(len(records) / chunk_size)
-            bar = st.progress(0, text="Caricamento in corso...")
-            for i in range(total_chunks):
-                chunk = records[i * chunk_size:(i + 1) * chunk_size]
-                supabase.table('reservations').upsert(chunk, on_conflict='user_id, pms_reservation_id').execute()
-                bar.progress((i + 1) / total_chunks, text=f"Lotto {i+1}/{total_chunks} caricato...")
-            return len(records)
-
-        # ════════════════════════════════════
-        # FLUSSO A — KrossBooking (invariato)
-        # ════════════════════════════════════
-        if pms_mode == "KrossBooking":
-            st.info("Carica l'ultimo export di KrossBooking. Il sistema aggiungerà le nuove prenotazioni e aggiornerà quelle modificate.")
-            file_upload = st.file_uploader("📂 Carica file Excel KrossBooking", type=['xlsx'])
-            if file_upload:
-                if st.button("🚀 Sincronizza nel Cloud"):
-                    with st.spinner("Analisi e caricamento in corso..."):
-                        df_limpio, df_cancellate = load_and_clean_krossbooking(file_upload)
-                        dfs = [d for d in [df_limpio, df_cancellate] if d is not None and not d.empty]
-                        if dfs:
-                            df_total = pd.concat(dfs, ignore_index=True)
-                            df_total['pms_reservation_id'] = df_total['id'].astype(str)
-                            try:
-                                n = _upsert_reservations(df_total)
-                                st.cache_data.clear()
-                                st.success(f"✅ Sincronizzazione completata! ({n} record analizzati, incluse cancellazioni).")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Errore durante l'aggiornamento: {e}")
-                        else:
-                            st.warning("Il file caricato non contiene dati validi.")
-
-        # ════════════════════════════════════
-        # FLUSSO B — Altro PMS (parser generico)
-        # ════════════════════════════════════
-        else:
-            st.info("Carica un export Excel da qualsiasi PMS. La prima volta configurerai il mapping delle colonne — verrà salvato per i prossimi upload.")
-
-            pms_name = st.text_input("Nome PMS (es. Mews, Opera, Beds24, ecc.)", placeholder="Il tuo PMS")
-            file_upload_gen = st.file_uploader("📂 Carica file Excel", type=['xlsx', 'xls'], key="gen_upload")
-
-            if file_upload_gen and pms_name:
-                df_raw = pd.read_excel(file_upload_gen)
-                raw_cols = list(df_raw.columns.astype(str))
-                opts = ["(Non mappare)"] + raw_cols
-
-                # Cerca mapping salvato per questo PMS
-                saved_res = supabase.table('pms_mappings').select('mapping') \
-                    .eq('user_id', USER_ID).eq('pms_name', pms_name).execute()
-                saved_mapping = saved_res.data[0]['mapping'] if saved_res.data else {}
-
-                if saved_mapping:
-                    st.success(f"✅ Mapping '{pms_name}' trovato — precompilato. Verifica e conferma.")
-                else:
-                    st.warning("Nessun mapping salvato per questo PMS. Configura le colonne qui sotto.")
-
-                with st.expander("🗺️ Configura Mapping Colonne", expanded=not bool(saved_mapping)):
-                    new_mapping = {}
-                    col_a, col_b = st.columns(2)
-                    for idx, (field, label) in enumerate(FIELD_LABELS.items()):
-                        container = col_a if idx % 2 == 0 else col_b
-                        saved_val = saved_mapping.get(field, "(Non mappare)")
-                        default_idx = opts.index(saved_val) if saved_val in opts else 0
-                        chosen = container.selectbox(label, opts, index=default_idx, key=f"gmap_{field}")
-                        new_mapping[field] = chosen if chosen != "(Non mappare)" else None
-
-                # Validazione
-                errors = validate_mapping(new_mapping)
-                if errors:
-                    for e in errors:
-                        st.error(e)
-                else:
-                    col_prev, col_load = st.columns(2)
-
-                    if col_prev.button("👁️ Anteprima (prime 5 righe)"):
-                        try:
-                            df_norm = apply_mapping(df_raw, new_mapping)
-                            st.dataframe(df_norm.head(5), use_container_width=True)
-                            st.caption(f"{len(df_norm)} prenotazioni valide trovate nel file.")
-                        except Exception as e:
-                            st.error(f"Errore nell'anteprima: {e}")
-
-                    if col_load.button("🚀 Carica & Salva Mapping", type="primary"):
-                        with st.spinner("Normalizzazione e caricamento in corso..."):
-                            try:
-                                # Salva mapping per riuso futuro
-                                supabase.table('pms_mappings').upsert(
-                                    {"user_id": USER_ID, "pms_name": pms_name, "mapping": new_mapping},
-                                    on_conflict="user_id,pms_name"
-                                ).execute()
-
-                                df_norm = apply_mapping(df_raw, new_mapping)
-                                if df_norm.empty:
-                                    st.warning("Nessuna prenotazione valida trovata dopo la normalizzazione. Verifica il mapping.")
-                                else:
-                                    n = _upsert_reservations(df_norm)
-                                    st.cache_data.clear()
-                                    st.success(f"✅ {n} prenotazioni caricate da '{pms_name}'. Mapping salvato per i prossimi upload.")
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"Errore: {e}")
-            elif file_upload_gen and not pms_name:
-                st.warning("Inserisci il nome del PMS per salvare il mapping.")
+        render_upload_section(TENANT_ID, USER_ID, key="dati")
         
         st.divider()
 
@@ -2085,91 +1722,49 @@ Obiettivo: [risultato atteso]
         st.subheader("🕵️ Gestione Competitor")
         st.caption("Aggiungi gli hotel concorrenti che vuoi monitorare. Usa l'URL della pagina su Booking.com.")
 
-        res_comp_list = supabase.table("competitors").select("id, name, booking_url") \
-            .eq("user_id", USER_ID).order("name").execute()
+        _props_comp = db.load_properties(supabase, TENANT_ID)
+        _prop_names_comp = dict(zip(_props_comp['id'], _props_comp['name']))
+        comp_list = db.load_competitors(supabase, TENANT_ID)
 
-        if res_comp_list.data:
-            for comp in res_comp_list.data:
-                ca, cb, cc = st.columns([2, 5, 1])
+        if comp_list:
+            for comp in comp_list:
+                ca, cb, cc, cd = st.columns([2, 2, 4, 1])
                 ca.markdown(f"**{comp['name']}**")
-                cb.caption(comp['booking_url'][:70] + "…" if len(comp['booking_url']) > 70 else comp['booking_url'])
-                if cc.button("🗑️", key=f"del_comp_{comp['id']}"):
-                    supabase.table("competitors").delete().eq("id", comp['id']).execute()
+                cb.caption(f"🏠 {_prop_names_comp.get(comp['property_id'], '—')}")
+                cc.caption(comp['url'][:70] + "…" if len(comp['url']) > 70 else comp['url'])
+                if cd.button("🗑️", key=f"del_comp_{comp['id']}"):
+                    db.delete_competitor(supabase, comp['id'])
+                    st.cache_data.clear()
                     st.rerun()
         else:
             st.info("Nessun competitor ancora registrato.")
 
-        with st.form("form_add_competitor"):
-            cn1, cn2 = st.columns(2)
-            new_comp_name = cn1.text_input("Nome hotel competitor", placeholder="Hotel Bellavista")
-            new_comp_url  = cn2.text_input("URL Booking.com", placeholder="https://www.booking.com/hotel/it/...")
-            if st.form_submit_button("➕ Aggiungi Competitor"):
-                if not new_comp_name or not new_comp_url:
-                    st.error("Inserisci sia il nome che l'URL.")
-                elif "booking.com" not in new_comp_url:
-                    st.error("L'URL deve essere una pagina Booking.com.")
-                else:
-                    supabase.table("competitors").insert({
-                        "user_id": USER_ID,
-                        "name": new_comp_name,
-                        "booking_url": new_comp_url
-                    }).execute()
-                    st.success(f"✅ '{new_comp_name}' aggiunto!")
-                    st.rerun()
+        if _props_comp.empty:
+            st.info("Carica prima le prenotazioni: ogni competitor va associato a una tua proprietà.")
+        else:
+            with st.form("form_add_competitor"):
+                cn0, cn1, cn2 = st.columns([1.2, 1, 1.5])
+                new_comp_prop = cn0.selectbox("Per la proprietà", _props_comp['id'].tolist(),
+                                              format_func=lambda pid: _prop_names_comp[pid])
+                new_comp_name = cn1.text_input("Nome competitor", placeholder="Hotel Bellavista")
+                new_comp_url  = cn2.text_input("URL Booking.com", placeholder="https://www.booking.com/hotel/it/...")
+                if st.form_submit_button("➕ Aggiungi Competitor"):
+                    if not new_comp_name or not new_comp_url:
+                        st.error("Inserisci sia il nome che l'URL.")
+                    elif "booking.com" not in new_comp_url:
+                        st.error("L'URL deve essere una pagina Booking.com.")
+                    else:
+                        try:
+                            db.add_competitor(supabase, TENANT_ID, new_comp_prop, new_comp_name, new_comp_url)
+                            st.cache_data.clear()
+                            st.success(f"✅ '{new_comp_name}' aggiunto!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Errore: {e}")
 
         st.divider()
 
-        # --- SEZIONE 3: BUDGET ANNUALE ---
-        st.subheader("🎯 Budget Annuale")
-        st.caption("Imposta i target mensili di Revenue, Occupancy e ADR. Verranno usati nella sezione Forecast.")
-
-        anno_budget = st.selectbox("Anno", [fecha_hoy_pd.year, fecha_hoy_pd.year + 1], key="anno_budget_sel")
-        mese_budget = st.selectbox("Mese", range(1, 13), format_func=lambda x: MESI_IT[x-1], key="mese_budget_sel")
-
-        existing_bud = load_budget(USER_ID, anno_budget, mese_budget)
-
-        with st.form("form_budget"):
-            bc1, bc2, bc3 = st.columns(3)
-            bud_rev_in  = bc1.number_input("Target Revenue (€)", min_value=0.0, step=1000.0,
-                                            value=float(existing_bud['target_revenue']) if existing_bud else 0.0)
-            bud_occ_in  = bc2.number_input("Target Occupancy (%)", min_value=0.0, max_value=100.0, step=1.0,
-                                            value=float(existing_bud['target_occupancy']) if existing_bud else 0.0)
-            bud_adr_in  = bc3.number_input("Target ADR (€)", min_value=0.0, step=5.0,
-                                            value=float(existing_bud['target_adr']) if existing_bud else 0.0)
-            bud_note    = st.text_input("Note (opzionale)", value=existing_bud.get('notes', '') if existing_bud else "")
-
-            if st.form_submit_button("💾 Salva Budget", type="primary"):
-                try:
-                    supabase.table('monthly_budget').upsert({
-                        "user_id": USER_ID, "year": anno_budget, "month": mese_budget,
-                        "target_revenue": bud_rev_in, "target_occupancy": bud_occ_in,
-                        "target_adr": bud_adr_in, "notes": bud_note
-                    }, on_conflict="user_id,year,month").execute()
-                    st.cache_data.clear()
-                    st.success(f"✅ Budget {MESI_IT[mese_budget-1]} {anno_budget} salvato!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Errore: {e}")
-
-        # Tabella riepilogo anno
-        with st.expander(f"📋 Riepilogo Budget {anno_budget}", expanded=False):
-            bud_year = load_budget_year(USER_ID, anno_budget)
-            if bud_year:
-                df_bud = pd.DataFrame(bud_year)[['month', 'target_revenue', 'target_occupancy', 'target_adr']]
-                df_bud['month'] = df_bud['month'].apply(lambda m: MESI_IT[m-1])
-                df_bud.columns = ['Mese', 'Revenue (€)', 'Occupancy (%)', 'ADR (€)']
-                st.markdown(_html_table(
-                    df_bud,
-                    fmt={'Revenue (€)': '€{:,.0f}', 'Occupancy (%)': '{:.1f}%', 'ADR (€)': '€{:.0f}'}
-                ), unsafe_allow_html=True)
-                tot = sum(b['target_revenue'] for b in bud_year)
-                st.metric("Totale Revenue Budget Annuo", f"€{tot:,.0f}")
-            else:
-                st.info("Nessun budget impostato per quest'anno.")
-
-        st.divider()
-
-        # --- SEZIONE 4: CONFIGURAZIONE COSTI PERMANENTI ---
+        # --- SEZIONE 3: CONFIGURAZIONE COSTI PERMANENTI ---
         st.subheader("⚙️ Configurazione Costi")
         st.caption("Configura una sola volta i costi per ogni unità — vengono applicati automaticamente a tutte le prenotazioni future. Se aggiorni una categoria già esistente, il vecchio valore viene storicizzato.")
 
@@ -2187,8 +1782,8 @@ Obiettivo: [risultato atteso]
         _VAR_LABELS = list(_VAR_CAT.values())
         _VAR_KEYS   = list(_VAR_CAT.keys())
 
-        res_props_c = supabase.table('properties').select('id, kross_unit_id').eq('user_id', USER_ID).execute()
-        props_c     = {p['kross_unit_id']: p['id'] for p in res_props_c.data} if res_props_c.data else {}
+        _props_c = db.load_properties(supabase, TENANT_ID)
+        props_c  = dict(zip(_props_c['name'], _props_c['id']))
 
         if not props_c:
             st.info("Carica un file di prenotazioni per registrare le tue proprietà prima di configurare i costi.")
@@ -2197,14 +1792,10 @@ Obiettivo: [risultato atteso]
             prop_c_id   = props_c[prop_c_nome]
 
             # Carica costi attivi e cleaning fee per questa proprietà
-            _rfix  = supabase.table('fixed_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
-            _rvar  = supabase.table('variable_costs').select('*').eq('property_id', prop_c_id).is_('valid_to', 'null').execute()
-            _rutil = supabase.table('utility_bills').select('*').eq('property_id', prop_c_id).order('period_to', desc=True).limit(8).execute()
-            _rprop = supabase.table('properties').select('cleaning_fee').eq('id', prop_c_id).execute()
-            df_fix_c  = pd.DataFrame(_rfix.data)  if _rfix.data  else pd.DataFrame()
-            df_var_c  = pd.DataFrame(_rvar.data)  if _rvar.data  else pd.DataFrame()
-            df_util_c = pd.DataFrame(_rutil.data) if _rutil.data else pd.DataFrame()
-            current_cf = float(_rprop.data[0].get('cleaning_fee') or 0) if _rprop.data else 0.0
+            df_fix_c, df_var_c, df_util_c = db.load_costs(supabase, TENANT_ID, property_id=prop_c_id)
+            df_util_c = df_util_c.head(8)
+            _settings_c = db.load_current_settings(supabase, TENANT_ID, prop_c_id)
+            current_cf = float(_settings_c.get('cleaning_fee') or 0) if _settings_c else 0.0
 
             # ── Cleaning fee (ricavo da guest, non incluso nel PMS) ──
             with st.expander(f"🧹 Quota Pulizie addebitata al Guest — attuale: €{current_cf:.2f}/soggiorno", expanded=(current_cf == 0)):
@@ -2213,7 +1804,7 @@ Obiettivo: [risultato atteso]
                     new_cf = st.number_input("Importo per soggiorno (€):", min_value=0.0, value=current_cf, step=5.0, format="%.2f")
                     if st.form_submit_button("💾 Aggiorna", type="primary"):
                         try:
-                            supabase.table('properties').update({"cleaning_fee": float(new_cf)}).eq('id', prop_c_id).execute()
+                            db.update_settings(supabase, TENANT_ID, prop_c_id, {"cleaning_fee": float(new_cf)})
                             st.success(f"✅ Quota pulizie aggiornata a €{new_cf:.2f}/soggiorno.")
                             st.cache_data.clear(); st.rerun()
                         except Exception as e:
@@ -2236,7 +1827,7 @@ Obiettivo: [risultato atteso]
                         _cc.caption(_freq_map.get(_r['frequency'], _r['frequency']))
                         if _cd.button("🗑️", key=f"del_fix_{_r['id']}", help="Elimina"):
                             try:
-                                supabase.table('fixed_costs').delete().eq('id', _r['id']).execute()
+                                db.delete_cost(supabase, _r['id'])
                                 st.cache_data.clear(); st.rerun()
                             except Exception as _e:
                                 st.error(f"Errore: {_e}")
@@ -2257,7 +1848,7 @@ Obiettivo: [risultato atteso]
                         _cc.caption(f"{_pf} → {_pt}")
                         if _cd.button("🗑️", key=f"del_util_{_r['id']}", help="Elimina"):
                             try:
-                                supabase.table('utility_bills').delete().eq('id', _r['id']).execute()
+                                db.delete_cost(supabase, _r['id'])
                                 st.cache_data.clear(); st.rerun()
                             except Exception as _e:
                                 st.error(f"Errore: {_e}")
@@ -2279,7 +1870,7 @@ Obiettivo: [risultato atteso]
                         _cc.caption(_basis_map.get(_r['basis'], _r['basis']))
                         if _cd.button("🗑️", key=f"del_var_{_r['id']}", help="Elimina"):
                             try:
-                                supabase.table('variable_costs').delete().eq('id', _r['id']).execute()
+                                db.delete_cost(supabase, _r['id'])
                                 st.cache_data.clear(); st.rerun()
                             except Exception as _e:
                                 st.error(f"Errore: {_e}")
@@ -2307,15 +1898,12 @@ Obiettivo: [risultato atteso]
                                 st.error("Importo deve essere > 0.")
                             else:
                                 try:
-                                    ok_c, msg_c = update_or_insert_cost(
-                                        supabase, USER_ID, prop_c_id, "Fijo", motivo_c, importo_c, data_c,
-                                        None, None, "monthly" if freq_lbl == "Mensile" else "yearly",
+                                    db.save_recurring_cost(
+                                        supabase, TENANT_ID, prop_c_id, motivo_c,
+                                        "monthly" if freq_lbl == "Mensile" else "yearly", importo_c, data_c,
                                     )
-                                    if ok_c:
-                                        st.success(f"✅ {motivo_c} — €{importo_c:.2f}/{freq_lbl.lower()} salvato.")
-                                        st.cache_data.clear(); st.rerun()
-                                    else:
-                                        st.error(msg_c)
+                                    st.success(f"✅ {motivo_c} — €{importo_c:.2f}/{freq_lbl.lower()} salvato.")
+                                    st.cache_data.clear(); st.rerun()
                                 except Exception as e:
                                     st.error(f"Errore: {e}")
 
@@ -2335,15 +1923,8 @@ Obiettivo: [risultato atteso]
                                 st.error("La data 'Al' deve essere successiva alla data 'Dal'.")
                             else:
                                 try:
-                                    supabase.table('utility_bills').insert({
-                                        "user_id":     USER_ID,
-                                        "property_id": prop_c_id,
-                                        "category":    cat_u,
-                                        "amount":      float(importo_c),
-                                        "period_from": data_from.isoformat(),
-                                        "period_to":   data_to.isoformat(),
-                                        "notes":       note_c or None,
-                                    }).execute()
+                                    db.save_utility_bill(supabase, TENANT_ID, prop_c_id, cat_u, importo_c,
+                                                         data_from, data_to, note_c)
                                     st.success(f"✅ Bolletta {cat_u} €{importo_c:.2f} salvata ({data_from.strftime('%d/%m')}–{data_to.strftime('%d/%m/%Y')}).")
                                     st.cache_data.clear(); st.rerun()
                                 except Exception as e:
@@ -2363,15 +1944,9 @@ Obiettivo: [risultato atteso]
                                 st.error("Importo deve essere > 0.")
                             else:
                                 try:
-                                    ok_c, msg_c = update_or_insert_cost(
-                                        supabase, USER_ID, prop_c_id, "Variable", motivo_c, importo_c, data_c,
-                                        base_c, None, None,
-                                    )
-                                    if ok_c:
-                                        st.success(f"✅ {var_lbl.split(' ',1)[1]} — €{importo_c:.2f} {base_lbl.lower()} salvato.")
-                                        st.cache_data.clear(); st.rerun()
-                                    else:
-                                        st.error(msg_c)
+                                    db.save_recurring_cost(supabase, TENANT_ID, prop_c_id, motivo_c, base_c, importo_c, data_c)
+                                    st.success(f"✅ {var_lbl.split(' ',1)[1]} — €{importo_c:.2f} {base_lbl.lower()} salvato.")
+                                    st.cache_data.clear(); st.rerun()
                                 except Exception as e:
                                     st.error(f"Errore: {e}")
 
@@ -2382,160 +1957,8 @@ else:
     st.divider()
     _, col_ob, _ = st.columns([1, 2, 1])
     with col_ob:
-        st.markdown("## 👋 Benvenuto in Rate Labs RMS!")
+        st.markdown("## 👋 Benvenuto in Rate Labs!")
         st.info("Il database è vuoto. Carica il tuo primo file di prenotazioni per iniziare ad analizzare il portafoglio.")
         st.markdown("---")
 
-        pms_mode_ob = st.radio(
-            "Seleziona il tuo PMS:",
-            ["KrossBooking", "Altro PMS"],
-            horizontal=True,
-            key="ob_pms_mode"
-        )
-
-        # ── Flusso KrossBooking ──
-        if pms_mode_ob == "KrossBooking":
-            file_ob = st.file_uploader(
-                "📂 Carica il file Excel esportato da KrossBooking",
-                type=['xlsx'],
-                key="ob_file_kb"
-            )
-            if file_ob:
-                if st.button("🚀 Carica e Sincronizza", type="primary", use_container_width=True):
-                    with st.spinner("Analisi e caricamento in corso..."):
-                        df_limpio, df_cancellate = load_and_clean_krossbooking(file_ob)
-                        dfs = [d for d in [df_limpio, df_cancellate] if d is not None and not d.empty]
-                        if not dfs:
-                            st.warning("⚠️ Il file non contiene dati validi.")
-                        else:
-                            try:
-                                df_total = pd.concat(dfs, ignore_index=True)
-                                df_total['pms_reservation_id'] = df_total['id'].astype(str)
-
-                                prop_map = {}
-                                for prop_name in df_total['unit_id'].dropna().unique():
-                                    res = supabase.table('properties').upsert(
-                                        {"user_id": USER_ID, "kross_unit_id": prop_name},
-                                        on_conflict='user_id, kross_unit_id'
-                                    ).execute()
-                                    prop_map[prop_name] = res.data[0]['id']
-
-                                records = []
-                                for _, row in df_total.iterrows():
-                                    records.append({
-                                        "user_id":            USER_ID,
-                                        "property_id":        prop_map.get(row['unit_id']),
-                                        "pms_reservation_id": str(row['pms_reservation_id']),
-                                        "check_in_date":      row['check_in_date'].strftime('%Y-%m-%d') if pd.notnull(row['check_in_date']) else None,
-                                        "check_out_date":     row['check_out_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('check_out_date')) else None,
-                                        "booking_date":       row['booking_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('booking_date')) else None,
-                                        "gross_revenue":      float(row['gross_revenue']),
-                                        "commission_amount":  float(row['commission_amount']),
-                                        "net_revenue":        float(row['net_revenue']),
-                                        "pm_net":             float(row['pm_net']),
-                                        "owner_net":          float(row['owner_net']),
-                                        "nights":             int(row['nights']),
-                                        "lead_time":          int(row['lead_time']),
-                                        "status":             str(row['status']),
-                                        "channel":            str(row.get('channel', '') or ''),
-                                        "channel_group":      str(row['channel_group']) if pd.notnull(row.get('channel_group')) else 'Altro',
-                                    })
-
-                                bar = st.progress(0, text="Caricamento in corso...")
-                                total_chunks = math.ceil(len(records) / 500)
-                                for i in range(total_chunks):
-                                    chunk = records[i * 500:(i + 1) * 500]
-                                    supabase.table('reservations').upsert(chunk, on_conflict='user_id, pms_reservation_id').execute()
-                                    bar.progress((i + 1) / total_chunks, text=f"Lotto {i+1}/{total_chunks}...")
-
-                                st.cache_data.clear()
-                                st.success(f"✅ {len(records)} prenotazioni caricate con successo! Ricaricamento...")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Errore durante il caricamento: {e}")
-
-        # ── Flusso Altro PMS ──
-        else:
-            pms_name_ob = st.text_input("Nome PMS (es. Mews, Opera, Beds24...)", key="ob_pms_name")
-            file_ob_gen = st.file_uploader("📂 Carica file Excel", type=['xlsx', 'xls'], key="ob_file_gen")
-
-            if file_ob_gen and pms_name_ob:
-                df_raw_ob = pd.read_excel(file_ob_gen)
-                raw_cols_ob = list(df_raw_ob.columns.astype(str))
-                opts_ob = ["(Non mappare)"] + raw_cols_ob
-
-                saved_res_ob = supabase.table('pms_mappings').select('mapping') \
-                    .eq('user_id', USER_ID).eq('pms_name', pms_name_ob).execute()
-                saved_mapping_ob = saved_res_ob.data[0]['mapping'] if saved_res_ob.data else {}
-
-                if saved_mapping_ob:
-                    st.success(f"✅ Mapping '{pms_name_ob}' trovato — precompilato.")
-                else:
-                    st.warning("Nessun mapping salvato. Configura le colonne qui sotto.")
-
-                with st.expander("🗺️ Configura Mapping Colonne", expanded=not bool(saved_mapping_ob)):
-                    new_mapping_ob = {}
-                    col_a_ob, col_b_ob = st.columns(2)
-                    for idx, (field, label) in enumerate(FIELD_LABELS.items()):
-                        container = col_a_ob if idx % 2 == 0 else col_b_ob
-                        saved_val = saved_mapping_ob.get(field, "(Non mappare)")
-                        default_idx = opts_ob.index(saved_val) if saved_val in opts_ob else 0
-                        chosen = container.selectbox(label, opts_ob, index=default_idx, key=f"ob_gmap_{field}")
-                        new_mapping_ob[field] = chosen if chosen != "(Non mappare)" else None
-
-                errors_ob = validate_mapping(new_mapping_ob)
-                for err in errors_ob:
-                    st.error(err)
-
-                if not errors_ob:
-                    if st.button("🚀 Carica & Salva Mapping", type="primary", use_container_width=True, key="ob_load_gen"):
-                        with st.spinner("Normalizzazione e caricamento..."):
-                            try:
-                                supabase.table('pms_mappings').upsert(
-                                    {"user_id": USER_ID, "pms_name": pms_name_ob, "mapping": new_mapping_ob},
-                                    on_conflict="user_id,pms_name"
-                                ).execute()
-                                df_norm_ob = apply_mapping(df_raw_ob, new_mapping_ob)
-                                if df_norm_ob.empty:
-                                    st.warning("Nessuna prenotazione valida trovata. Verifica il mapping.")
-                                else:
-                                    prop_map_ob = {}
-                                    for prop_name in df_norm_ob['unit_id'].dropna().unique():
-                                        res = supabase.table('properties').upsert(
-                                            {"user_id": USER_ID, "kross_unit_id": prop_name},
-                                            on_conflict='user_id, kross_unit_id'
-                                        ).execute()
-                                        prop_map_ob[prop_name] = res.data[0]['id']
-
-                                    records_ob = []
-                                    for _, row in df_norm_ob.iterrows():
-                                        records_ob.append({
-                                            "user_id":            USER_ID,
-                                            "property_id":        prop_map_ob.get(row['unit_id']),
-                                            "pms_reservation_id": str(row['pms_reservation_id']),
-                                            "check_in_date":      row['check_in_date'].strftime('%Y-%m-%d') if pd.notnull(row['check_in_date']) else None,
-                                            "check_out_date":     row['check_out_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('check_out_date')) else None,
-                                            "booking_date":       row['booking_date'].strftime('%Y-%m-%d') if pd.notnull(row.get('booking_date')) else None,
-                                            "gross_revenue":      float(row['gross_revenue']),
-                                            "commission_amount":  float(row['commission_amount']),
-                                            "net_revenue":        float(row['net_revenue']),
-                                            "pm_net":             float(row['pm_net']),
-                                            "owner_net":          float(row['owner_net']),
-                                            "nights":             int(row['nights']),
-                                            "lead_time":          int(row['lead_time']),
-                                            "status":             str(row['status']),
-                                            "channel":            str(row.get('channel', '') or ''),
-                                            "channel_group":      str(row.get('channel_group', 'Altro') or 'Altro'),
-                                        })
-
-                                    for i in range(math.ceil(len(records_ob) / 500)):
-                                        chunk = records_ob[i * 500:(i + 1) * 500]
-                                        supabase.table('reservations').upsert(chunk, on_conflict='user_id, pms_reservation_id').execute()
-
-                                    st.cache_data.clear()
-                                    st.success(f"✅ {len(records_ob)} prenotazioni caricate da '{pms_name_ob}'!")
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Errore: {e}")
-            elif file_ob_gen and not pms_name_ob:
-                st.warning("Inserisci il nome del PMS per continuare.")
+        render_upload_section(TENANT_ID, USER_ID, key="ob")

@@ -47,7 +47,7 @@ def load_and_clean_krossbooking(file):
     df = pd.read_excel(file)
 
     # 1. Parsing Date (a todo el dataset)
-    for col in ['Check in', 'Data inserimento', 'Check-out']:
+    for col in ['Check in', 'Data inserimento', 'Check-out', 'Data cancellazione']:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
 
@@ -86,15 +86,15 @@ def load_and_clean_krossbooking(file):
         'Stato': 'status',
         'Canale': 'channel',
         'Canale_Gruppo': 'channel_group',
-        'Lead Time': 'lead_time'
+        'Lead Time': 'lead_time',
+        'Data cancellazione': 'cancellation_date'
     }
     df = df.rename(columns=col_mapping)
 
     # 5. SPLIT FINALE (Separazione attive e cancellate con tutte le metriche calcolate)
-    if 'Data cancellazione' in df.columns:
-        # Nota: renombramos las columnas antes, así que 'Data cancellazione' no cambió de nombre
-        df_cancellate = df[df['Data cancellazione'].notna()].copy()
-        df_attive = df[df['Data cancellazione'].isna()].copy()
+    if 'cancellation_date' in df.columns:
+        df_cancellate = df[df['cancellation_date'].notna()].copy()
+        df_attive = df[df['cancellation_date'].isna()].copy()
     elif 'status' in df.columns: # 'Stato' ahora es 'status'
         df_cancellate = df[df['status'].isin(STATI_CANCELLATI)].copy()
         df_attive = df[~df['status'].isin(STATI_CANCELLATI)].copy()

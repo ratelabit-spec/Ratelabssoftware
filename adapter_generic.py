@@ -5,7 +5,7 @@ import hashlib
 INTERNAL_COLUMNS = [
     'pms_reservation_id', 'check_in_date', 'check_out_date', 'booking_date',
     'gross_revenue', 'commission_amount', 'net_revenue', 'pm_net', 'owner_net',
-    'nights', 'lead_time', 'channel_group', 'status', 'unit_id'
+    'nights', 'lead_time', 'channel_group', 'status', 'unit_id', 'cancellation_date'
 ]
 
 # Required: upload will fail if these can't be resolved
@@ -20,6 +20,7 @@ FIELD_LABELS = {
     'pms_reservation_id':   'ID Prenotazione (generato se vuoto)',
     'check_out_date':       'Data Check-out',
     'booking_date':         'Data Prenotazione',
+    'cancellation_date':    'Data Cancellazione',
     'commission_amount':    'Commissione OTA (€)',
     'nights':               'Notti (se non c\'è Check-out)',
     'lead_time':            'Lead Time (giorni)',
@@ -50,7 +51,7 @@ def apply_mapping(df_raw: pd.DataFrame, mapping: dict) -> pd.DataFrame:
             df[internal_col] = None
 
     # 2. Convert dates
-    for col in ['check_in_date', 'check_out_date', 'booking_date']:
+    for col in ['check_in_date', 'check_out_date', 'booking_date', 'cancellation_date']:
         df[col] = _to_date(df[col])
 
     # 3. Numeric coercion

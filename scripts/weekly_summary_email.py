@@ -1,8 +1,8 @@
 # scripts/weekly_summary_email.py
 """
-Invia un'email settimanale di riepilogo + alert a ogni utente registrato.
+Invia un'email settimanale di riepilogo + alert agli owner di ogni tenant.
 Eseguito da GitHub Actions (.github/workflows/weekly_summary_email.yml), non da Streamlit.
-Usa la SUPABASE_SERVICE_ROLE_KEY (bypassa RLS) per leggere tutti gli utenti/proprietà.
+Usa la SUPABASE_SERVICE_ROLE_KEY (bypassa RLS) per leggere tutti i tenant/proprietà.
 """
 import os
 import sys
@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 from supabase import create_client
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import db  # noqa: E402
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -22,26 +25,12 @@ OCC_ALERT_THRESHOLD = 40.0  # % — sotto questa soglia nei prossimi 7gg, la pro
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-def load_reservations(user_id):
-    resp = supabase.table("reservations").select("*, properties(kross_unit_id)").eq("user_id", user_id).execute()
-    if not resp.data:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(resp.data)
-    df["unit_id"] = df["properties"].apply(
-        lambda x: x["kross_unit_id"] if isinstance(x, dict) and "kross_unit_id" in x else "Sconosciuto"
-    )
-    for col in ["check_in_date", "check_out_date", "booking_date"]:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in ["gross_revenue", "commission_amount", "nights"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    return df
-
-
-def load_total_units(user_id):
-    res = supabase.table("properties").select("id").eq("user_id", user_id).execute()
-    return len(res.data) if res.data else 0
+def load_owner_emails(tenant_id):
+    members = supabase.table("tenant_members").select("user_id").eq("tenant_id", tenant_id).eq("role", "owner").execute().data
+    if not members:
+        return []
+    profiles = supabase.table("profiles").select("email").in_("id", [m["user_id"] for m in members]).execute().data
+    return [p["email"] for p in profiles if p.get("email")]
 
 
 def compute_summary(df, total_units, today):
@@ -49,7 +38,7 @@ def compute_summary(df, total_units, today):
     if df.empty or total_units <= 0:
         return None
 
-    mask_canc = df["status"].astype(str).str.strip().str.lower().str.contains("cancel", na=False)
+    mask_canc = df["is_cancelled"].fillna(False).astype(bool)
     df_attive = df[~mask_canc].copy()
     df_canc = df[mask_canc].copy()
 
@@ -201,19 +190,15 @@ def send_email(to_email, subject, html):
 def main():
     today = pd.Timestamp(datetime.now(timezone.utc).date())
 
-    users_resp = supabase.auth.admin.list_users()
-    users = users_resp if isinstance(users_resp, list) else getattr(users_resp, "users", [])
+    tenants = supabase.table("tenants").select("id, name").execute().data or []
 
     sent, skipped = 0, 0
-    for user in users:
-        email = getattr(user, "email", None)
-        user_id = getattr(user, "id", None)
-        if not email or not user_id:
-            continue
-
-        total_units = load_total_units(user_id)
-        df = load_reservations(user_id)
-        if df.empty or total_units == 0:
+    for tenant in tenants:
+        emails = load_owner_emails(tenant["id"])
+        props = db.load_properties(supabase, tenant["id"])
+        total_units = int(props["units"].sum()) if not props.empty else 0
+        df = db.load_reservations(supabase, tenant["id"])
+        if not emails or df.empty or total_units == 0:
             skipped += 1
             continue
 
@@ -223,9 +208,10 @@ def main():
             continue
 
         per_property = {}
+        units_by_name = dict(zip(props["name"], props["units"].astype(int)))
         for unit in sorted(df["unit_id"].dropna().unique()):
             df_unit = df[df["unit_id"] == unit]
-            s = compute_summary(df_unit, 1, today)
+            s = compute_summary(df_unit, units_by_name.get(unit, 1), today)
             if s:
                 per_property[unit] = s
 
@@ -233,9 +219,10 @@ def main():
         subject = "📊 Riepilogo settimanale" + (" — ⚠️ Attenzione richiesta" if has_alerts else "")
         html = render_email(portfolio, per_property, today)
 
-        send_email(email, subject, html)
-        print(f"Email inviata a {email}")
-        sent += 1
+        for email in emails:
+            send_email(email, subject, html)
+            print(f"Email inviata a {email} ({tenant['name']})")
+            sent += 1
 
     print(f"Fatto. Inviate: {sent}, saltate (senza dati): {skipped}")
 

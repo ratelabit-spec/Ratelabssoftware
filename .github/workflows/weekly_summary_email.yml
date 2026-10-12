@@ -1,11 +1,12 @@
 name: Weekly Summary Email
 
 on:
-  schedule:
-    # Lunedì 12:00 UTC = 13:00 Europe/Rome (CET, ora solare).
-    # In ora legale (CEST, mar-ott) equivale alle 14:00 locali — GitHub Actions
-    # non gestisce il DST nel cron. Scostamento di 1h accettato per v1.x.
-    - cron: '0 12 * * 1'
+  # Esecuzione automatica disattivata finché non sono configurati i secrets
+  # (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, RESEND_API_KEY) di questo repo.
+  # Per attivarla, togli il commento alle 2 righe sotto.
+  # Lunedì 12:00 UTC = 13:00 Europe/Rome (CET); in ora legale (CEST) le 14:00.
+  # schedule:
+  #   - cron: '0 12 * * 1'
   workflow_dispatch: {}
 
 jobs:
