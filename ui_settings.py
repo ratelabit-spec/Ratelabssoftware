@@ -33,6 +33,11 @@ def _units_picker(props, label, key, default_ids):
     return list(names.keys()) if all_units else chosen
 
 
+def _text(value):
+    """None per valori mancanti (None/NaN), altrimenti la stringa."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _done(msg):
     st.cache_data.clear()
     st.success(msg)
@@ -126,6 +131,56 @@ def _cost_row(supabase, row, label, amount, detail, key):
         _done("✅ Costo eliminato.")
 
 
+def _render_copy_costs(supabase, tenant_id, props, sel, df_fix, df_var, df_util, basis_map, freq_map):
+    """Copia voci di costo dell'unità selezionata su altre unità, con stesso importo, base e chi paga."""
+    names = dict(zip(props['id'], props['name']))
+    items = {}
+    for _, r in df_fix.iterrows():
+        items[r['id']] = (f"🏛️ {r['category']} — €{float(r['amount']):,.2f} {freq_map.get(r['frequency'], '').lower()}",
+                          lambda pid, r=r: db.save_recurring_cost(supabase, tenant_id, pid, r['category'], r['frequency'],
+                                                                  r['amount'], datetime.date.fromisoformat(r['valid_from']),
+                                                                  borne_by=r['borne_by']))
+    for _, r in df_var.iterrows():
+        label = _VAR_CAT.get(r['cost_type'], r['cost_type']).split(' ', 1)[-1]
+        items[r['id']] = (f"🔑 {label} — €{float(r['value']):,.2f} {basis_map.get(r['basis'], '')}",
+                          lambda pid, r=r: db.save_recurring_cost(supabase, tenant_id, pid, r['cost_type'], r['basis'],
+                                                                  r['value'], datetime.date.fromisoformat(r['valid_from']),
+                                                                  channel=_text(r['channel_name']), borne_by=r['borne_by']))
+    for _, r in df_util.head(8).iterrows():
+        items[r['id']] = (f"⚡ {r['category']} — €{float(r['amount']):,.2f} ({pd.to_datetime(r['period_from']):%d/%m/%y} → {pd.to_datetime(r['period_to']):%d/%m/%y})",
+                          lambda pid, r=r: db.save_utility_bill(supabase, tenant_id, pid, r['category'], r['amount'],
+                                                                datetime.date.fromisoformat(r['period_from']),
+                                                                datetime.date.fromisoformat(r['period_to']),
+                                                                _text(r['notes']), borne_by=r['borne_by']))
+    if not items:
+        return
+
+    with st.expander(f"📋 Copia voci di {names[sel]} su altre unità"):
+        st.caption("Ogni unità riceve la stessa voce con lo stesso importo (non viene divisa). "
+                   "Se l'unità ha già quella voce, il valore precedente viene storicizzato.")
+        chosen = st.multiselect("Voci da copiare:", list(items.keys()), default=list(items.keys()),
+                                format_func=lambda cid: items[cid][0], key=f"copy_items_{sel}")
+        others = [pid for pid in props['id'] if pid != sel]
+        all_others = st.checkbox("Su tutte le altre unità", key=f"copy_all_{sel}")
+        target = others if all_others else st.multiselect("Su queste unità:", others, format_func=lambda pid: names[pid],
+                                                           key=f"copy_target_{sel}")
+        if st.button("📋 Copia", key=f"copy_btn_{sel}", type="primary"):
+            if not chosen or not target:
+                st.error("Seleziona almeno una voce e un'unità di destinazione.")
+            else:
+                # le bollette non sono storicizzate: non ricopiare una bolletta identica già presente
+                _, _, util_all = db.load_costs(supabase, tenant_id)
+                existing_bills = set(zip(util_all['property_id'], util_all['category'],
+                                         util_all['period_from'], util_all['period_to']))
+                bills = {r['id']: (r['category'], r['period_from'], r['period_to']) for _, r in df_util.iterrows()}
+                for pid in target:
+                    for cid in chosen:
+                        if cid in bills and (pid, *bills[cid]) in existing_bills:
+                            continue
+                        items[cid][1](pid)
+                _done(f"✅ {len(chosen)} voci copiate su {len(target)} unità.")
+
+
 def render_costs_section(supabase, tenant_id):
     st.subheader("⚙️ Configurazione Costi")
     st.caption(
@@ -189,6 +244,8 @@ def render_costs_section(supabase, tenant_id):
         if df_var.empty:
             st.info("Nessun costo operativo configurato.")
 
+        _render_copy_costs(supabase, tenant_id, props, sel, df_fix, df_var, df_util, basis_map, freq_map)
+
     # ── Aggiunta costi (anche su più unità) ──
     with cl_right:
         st.markdown("##### ➕ Aggiungi costo")
@@ -223,7 +280,7 @@ def render_costs_section(supabase, tenant_id):
                 c1, c2 = st.columns(2)
                 d_from = c1.date_input("Dal:", datetime.date.today().replace(day=1))
                 d_to   = c2.date_input("Al:", datetime.date.today())
-                split  = st.checkbox("Ripartisci l'importo tra le unità selezionate", value=True,
+                split  = st.checkbox("Ripartisci l'importo tra le unità selezionate",
                                      help="Es. una bolletta condominiale unica per più appartamenti.")
                 payer  = st.radio("A carico di:", ["Proprietario", "PM"], horizontal=True)
                 notes  = st.text_input("Note (opzionale)", placeholder="es. Bimestre gen-feb")
