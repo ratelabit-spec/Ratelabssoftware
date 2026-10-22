@@ -116,7 +116,7 @@ def load_costs(client, tenant_id, property_id=None):
         return query.eq('property_id', property_id) if property_id else query
     df = pd.DataFrame(fetch_all(q))
     if df.empty:
-        df = pd.DataFrame(columns=['id', 'property_id', 'category', 'basis', 'amount', 'channel', 'valid_from', 'valid_to', 'notes'])
+        df = pd.DataFrame(columns=['id', 'property_id', 'category', 'basis', 'amount', 'channel', 'valid_from', 'valid_to', 'notes', 'borne_by'])
     df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
     active = df['valid_to'].isna()
 
@@ -128,10 +128,12 @@ def load_costs(client, tenant_id, property_id=None):
             df_util.sort_values('period_to', ascending=False).reset_index(drop=True))
 
 
-def save_recurring_cost(client, tenant_id, property_id, category, basis, amount, valid_from, channel=None):
+def save_recurring_cost(client, tenant_id, property_id, category, basis, amount, valid_from,
+                        channel=None, borne_by='pm'):
     """
     Costo fisso (monthly/yearly) o variabile (per_booking/per_night/per_guest) con storico:
     il costo vigente della stessa categoria (e canale, per i variabili) viene chiuso al giorno prima.
+    borne_by: 'pm' (Property Manager) o 'owner' (proprietario).
     """
     group = FIXED_BASES if basis in FIXED_BASES else VARIABLE_BASES
     channel = str(channel).strip() if channel and str(channel).strip() else None
@@ -145,7 +147,7 @@ def save_recurring_cost(client, tenant_id, property_id, category, basis, amount,
         if datetime.date.fromisoformat(row['valid_from']) >= valid_from:
             # stesso giorno (o retrodatato): correggi il record invece di storicizzarlo
             client.table('property_costs').update(
-                {"basis": basis, "amount": float(amount), "valid_from": valid_from.isoformat()}
+                {"basis": basis, "amount": float(amount), "valid_from": valid_from.isoformat(), "borne_by": borne_by}
             ).eq('id', row['id']).execute()
             return
         client.table('property_costs').update(
@@ -154,20 +156,52 @@ def save_recurring_cost(client, tenant_id, property_id, category, basis, amount,
 
     client.table('property_costs').insert({
         "tenant_id": tenant_id, "property_id": property_id, "category": category, "basis": basis,
-        "amount": float(amount), "channel": channel, "valid_from": valid_from.isoformat(),
+        "amount": float(amount), "channel": channel, "valid_from": valid_from.isoformat(), "borne_by": borne_by,
     }).execute()
 
 
-def save_utility_bill(client, tenant_id, property_id, category, amount, period_from, period_to, notes=None):
+def save_utility_bill(client, tenant_id, property_id, category, amount, period_from, period_to,
+                      notes=None, borne_by='owner'):
     client.table('property_costs').insert({
         "tenant_id": tenant_id, "property_id": property_id, "category": category, "basis": UTILITY_BASIS,
         "amount": float(amount), "valid_from": period_from.isoformat(), "valid_to": period_to.isoformat(),
-        "notes": notes or None,
+        "notes": notes or None, "borne_by": borne_by,
     }).execute()
+
+
+def set_cost_payer(client, cost_id, borne_by):
+    client.table('property_costs').update({"borne_by": borne_by}).eq('id', cost_id).execute()
 
 
 def delete_cost(client, cost_id):
     client.table('property_costs').delete().eq('id', cost_id).execute()
+
+
+# ──────────────────────────────────────────
+# CALENDARIO DI APERTURA
+# ──────────────────────────────────────────
+def load_availability(client, tenant_id):
+    """Periodi di apertura: id, property_id, open_from, open_to, notes."""
+    q = lambda: (client.table('property_availability').select('id, property_id, open_from, open_to, notes')
+                 .eq('tenant_id', tenant_id).order('open_from'))
+    df = pd.DataFrame(fetch_all(q))
+    return df if not df.empty else pd.DataFrame(columns=['id', 'property_id', 'open_from', 'open_to', 'notes'])
+
+
+def add_availability(client, tenant_id, property_ids, open_from, open_to, notes=None):
+    client.table('property_availability').insert([
+        {"tenant_id": tenant_id, "property_id": pid, "open_from": open_from.isoformat(),
+         "open_to": open_to.isoformat(), "notes": notes or None}
+        for pid in property_ids
+    ]).execute()
+
+
+def delete_availability(client, availability_id):
+    client.table('property_availability').delete().eq('id', availability_id).execute()
+
+
+def update_property_units(client, property_id, units):
+    client.table('properties').update({"units": int(units)}).eq('id', property_id).execute()
 
 
 # ──────────────────────────────────────────

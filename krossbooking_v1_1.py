@@ -3,15 +3,16 @@ import pandas as pd
 import google.generativeai as genai
 import plotly.express as px
 import plotly.graph_objects as go
-import datetime
 import math
 from datetime import date
 from supabase import create_client
 from adapter_krossbooking import load_and_clean_krossbooking
 from adapter_generic import apply_mapping, validate_mapping, FIELD_LABELS
-from etl_metrics import calculate_property_margins
+from etl_metrics import calculate_property_margins, calculate_pm_owner_split
 from etl_supabase import upsert_reservations
 import db
+from capacity import capacity, capacity_by_month, daily_open_units
+from ui_settings import render_availability_section, render_costs_section
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Rate Labs", page_icon="📊", layout="wide")
@@ -291,10 +292,9 @@ def calcola_kpi(df_otb, df_otb_ly, df_final_ly):
 
 
 @st.cache_data(ttl=3600)
-def load_units_by_property(tenant_id):
-    """{nome proprietà: unità vendibili} — denominatore reale per occupancy, RevPAR e Bottom Rate."""
-    props = db.load_properties(supabase, tenant_id)
-    return dict(zip(props['name'], props['units'].astype(int)))
+def load_capacity_inputs(tenant_id):
+    """Proprietà attive (con unità vendibili) e periodi di apertura: base di occupancy, RevPAR e Bottom Rate."""
+    return db.load_properties(supabase, tenant_id), db.load_availability(supabase, tenant_id)
 
 @st.cache_data(ttl=3600)
 def load_portfolio_costs(tenant_id):
@@ -644,17 +644,21 @@ if not df_cloud.empty:
     giorni_mese = fecha_hoy_pd.replace(day=1).replace(month=mes_interes)
     giorni_nel_mese = (giorni_mese + pd.offsets.MonthEnd(0)).day
 
-    # Denominatore reale: se filtro attivo usa solo le unità selezionate, altrimenti tutto il portfolio
-    units_by_property = load_units_by_property(TENANT_ID)
-    total_units_portfolio = sum(units_by_property.values())
-    if apt_sel:
-        unita_cy = sum(units_by_property.get(a, 1) for a in apt_sel)
-    else:
-        unita_cy = total_units_portfolio if total_units_portfolio > 0 else max(df_cy['unit_id'].nunique(), 1)
-    unita_ly = unita_cy  # stesso sottoinsieme per confronto STLY
+    # Denominatore reale: unità selezionate (o tutto il portfolio) × notti aperte secondo il calendario
+    props_all, periods_all = load_capacity_inputs(TENANT_ID)
+    props_sel = props_all[props_all['name'].isin(apt_sel)] if apt_sel else props_all
+    total_units_portfolio = int(props_all['units'].sum())
+    unita_cy = int(props_sel['units'].sum()) or max(df_cy['unit_id'].nunique(), 1)
 
-    capacita_totale_cy = unita_cy * giorni_nel_mese
-    capacita_totale_ly = unita_ly * giorni_nel_mese
+    mes_start_cy = pd.Timestamp(anio_actual, mes_interes, 1)
+    mes_end_cy   = mes_start_cy + pd.offsets.MonthEnd(0)
+    daily_cap_mes = daily_open_units(props_sel, periods_all, mes_start_cy, mes_end_cy)   # giorno × proprietà
+    open_units_by_day  = daily_cap_mes.sum(axis=1)
+    cap_by_prop_mes    = daily_cap_mes.sum().to_dict()
+    capacita_totale_cy = int(open_units_by_day.sum())
+    capacita_totale_ly = capacity(props_sel, periods_all,
+                                  mes_start_cy - pd.DateOffset(years=1),
+                                  (mes_start_cy - pd.DateOffset(years=1)) + pd.offsets.MonthEnd(0))
 
     revpar    = k['rev']    / capacita_totale_cy if capacita_totale_cy > 0 else 0
     revpar_ly = k['rev_ly'] / capacita_totale_ly if capacita_totale_ly > 0 else 0
@@ -679,6 +683,11 @@ if not df_cloud.empty:
     # CERVELLO MATEMATICO — BOTTOM RATE
     # =====================================================
     df_fix_portfolio, df_var_portfolio, df_util_portfolio = load_portfolio_costs(TENANT_ID)
+    if apt_sel:
+        _sel_ids = set(props_sel['id'])
+        df_fix_portfolio  = df_fix_portfolio[df_fix_portfolio['property_id'].isin(_sel_ids)]
+        df_var_portfolio  = df_var_portfolio[df_var_portfolio['property_id'].isin(_sel_ids)]
+        df_util_portfolio = df_util_portfolio[df_util_portfolio['property_id'].isin(_sel_ids)]
     costos_configurados = not df_fix_portfolio.empty or not df_var_portfolio.empty or not df_util_portfolio.empty
 
     bottom_rate = 0.0
@@ -703,7 +712,7 @@ if not df_cloud.empty:
                 df_var_portfolio[df_var_portfolio['basis'] == 'per_guest']['value'].sum() * 2 / los_est
             )
 
-        capacita_annua = unita_cy * 365
+        capacita_annua = capacity(props_sel, periods_all, pd.Timestamp(anio_actual, 1, 1), pd.Timestamp(anio_actual, 12, 31))
         fixed_per_night = fixed_annual / capacita_annua if capacita_annua > 0 else 0.0
         costo_base_notte = fixed_per_night + var_per_night
         commissione_pct = (k['commissioni'] / k['rev'] * 100) if k['rev'] > 0 else 15.0
@@ -729,7 +738,6 @@ if not df_cloud.empty:
     st.caption(f"📍 {txt_filtro} | {total_units_portfolio} {lbl_unita}")
 
     # --- Dati aggregati YTD (tutte le mensilità, stessa logica OTB) ---
-    dias_ytd   = (fecha_hoy_pd - pd.Timestamp(anio_actual, 1, 1)).days + 1
     df_cy_ytd  = df_cy_attive[df_cy_attive['booking_date'] <= fecha_hoy_pd]
     df_ly_ytd  = df_ly_attive[df_ly_attive['booking_date'] <= fecha_stly]
 
@@ -745,11 +753,12 @@ if not df_cloud.empty:
     net_adr_ytd    = (rev_ytd - comm_ytd) / notti_ytd     if notti_ytd > 0 else 0
     net_adr_ly_ytd = (rev_ly_ytd - comm_ly_ytd) / notti_ly_ytd if notti_ly_ytd > 0 else 0
 
-    cap_ytd        = unita_cy * dias_ytd
-    revpar_ytd     = rev_ytd    / cap_ytd if cap_ytd > 0 else 0
-    revpar_ly_ytd  = rev_ly_ytd / cap_ytd if cap_ytd > 0 else 0
-    occ_ytd        = notti_ytd    / cap_ytd * 100 if cap_ytd > 0 else 0
-    occ_ly_ytd     = notti_ly_ytd / cap_ytd * 100 if cap_ytd > 0 else 0
+    cap_ytd        = capacity(props_sel, periods_all, pd.Timestamp(anio_actual, 1, 1), fecha_hoy_pd)
+    cap_ly_ytd     = capacity(props_sel, periods_all, pd.Timestamp(anio_actual - 1, 1, 1), fecha_stly)
+    revpar_ytd     = rev_ytd    / cap_ytd    if cap_ytd > 0 else 0
+    revpar_ly_ytd  = rev_ly_ytd / cap_ly_ytd if cap_ly_ytd > 0 else 0
+    occ_ytd        = notti_ytd    / cap_ytd    * 100 if cap_ytd > 0 else 0
+    occ_ly_ytd     = notti_ly_ytd / cap_ly_ytd * 100 if cap_ly_ytd > 0 else 0
 
     var_rev_ytd     = (rev_ytd / rev_ly_ytd - 1) * 100         if rev_ly_ytd > 0 else 0
     var_revpar_ytd  = (revpar_ytd / revpar_ly_ytd - 1) * 100   if revpar_ly_ytd > 0 else 0
@@ -784,8 +793,8 @@ if not df_cloud.empty:
         ).reset_index()
         g.columns = ['MeseNum', 'Revenue', 'Notti']
         g['ADR']    = g.apply(lambda r: r['Revenue'] / r['Notti'] if r['Notti'] > 0 else 0, axis=1)
-        g['Giorni'] = g['MeseNum'].apply(lambda m: (pd.Timestamp(anno, m, 1) + pd.offsets.MonthEnd(0)).day)
-        g['Occ%']   = g.apply(lambda r: r['Notti'] / (r['Giorni'] * unita_cy) * 100 if unita_cy > 0 else 0, axis=1)
+        cap_mesi    = capacity_by_month(props_sel, periods_all, anno)
+        g['Occ%']   = g.apply(lambda r: r['Notti'] / cap_mesi[r['MeseNum']] * 100 if cap_mesi[r['MeseNum']] > 0 else 0, axis=1)
         return _scaffold.merge(g[['MeseNum', 'Revenue', 'Notti', 'ADR', 'Occ%']], on='MeseNum', how='left').fillna(0)
 
     _men_cy        = _agg_men(df_cy_ytd, anio_actual);      _men_cy['Anno'] = str(anio_actual)
@@ -1202,8 +1211,9 @@ Rispondi con esattamente questo formato (max 200 parole):
                 Netto_Real=('net_revenue', 'sum')
             ).reset_index()
             
-            df_apt['Occupazione'] = (df_apt['Notti'] / giorni_nel_mese) * 100
-            df_apt['Net_RevPAR_Real'] = df_apt['Netto_Real'] / giorni_nel_mese
+            df_apt['Capacita'] = df_apt['unit_id'].map(cap_by_prop_mes).fillna(0)
+            df_apt['Occupazione'] = (df_apt['Notti'] / df_apt['Capacita'] * 100).where(df_apt['Capacita'] > 0, 0)
+            df_apt['Net_RevPAR_Real'] = (df_apt['Netto_Real'] / df_apt['Capacita']).where(df_apt['Capacita'] > 0, 0)
 
             df_apt = df_apt.sort_values('Ricavi_Lordi', ascending=True)
             df_apt_occ = df_apt.sort_values('Occupazione', ascending=True)
@@ -1415,12 +1425,7 @@ Rispondi con esattamente questo formato (max 200 parole):
         st.divider()
         st.subheader("📅 Segmentazione Weekday / Weekend")
         if not df_cy_otb.empty:
-            all_days_month = pd.date_range(
-                start=pd.Timestamp(fecha_hoy_pd.year, mes_interes, 1),
-                periods=giorni_nel_mese
-            )
-            weekday_days_n = sum(1 for d in all_days_month if d.dayofweek <= 3)
-            weekend_days_n = giorni_nel_mese - weekday_days_n
+            _is_weekday = open_units_by_day.index.dayofweek <= 3
 
             df_seg = df_cy_otb.copy()
             df_seg['dow'] = df_seg['check_in_date'].dt.dayofweek
@@ -1434,8 +1439,8 @@ Rispondi con esattamente questo formato (max 200 parole):
                 Prenotazioni=('id', 'count'),
             ).reset_index()
             cap_map = {
-                '💼 Weekday (Lun-Gio)': unita_cy * weekday_days_n,
-                '🏖️ Weekend (Ven-Dom)': unita_cy * weekend_days_n,
+                '💼 Weekday (Lun-Gio)': int(open_units_by_day[_is_weekday].sum()),
+                '🏖️ Weekend (Ven-Dom)': int(open_units_by_day[~_is_weekday].sum()),
             }
             seg['Capacita']  = seg['Segmento'].map(cap_map)
             seg['ADR']       = seg.apply(lambda r: r['Revenue'] / r['Notti'] if r['Notti'] > 0 else 0, axis=1)
@@ -1505,7 +1510,7 @@ Rispondi con esattamente questo formato (max 200 parole):
     
     with tab_costi:
         st.divider()
-        st.header("💰 Analisi Margine Netto (Netto PM)")
+        st.header("💰 Analisi Margine Netto")
 
         # 1. Recuperar propiedades del usuario
         _props = db.load_properties(supabase, TENANT_ID)
@@ -1563,7 +1568,12 @@ Rispondi con esattamente questo formato (max 200 parole):
                 col_calc1, col_calc2 = st.columns(2)
                 
                 with col_calc1:
-                    giorni_apertura = st.number_input("Giorni di apertura all'anno", min_value=30, max_value=365, value=365)
+                    _prop_row = props_all[props_all['id'] == p_id]
+                    _open_days = capacity(_prop_row.assign(units=1), periods_all,
+                                          pd.Timestamp(anno, 1, 1), pd.Timestamp(anno, 12, 31)) if not _prop_row.empty else 365
+                    giorni_apertura = st.number_input("Giorni di apertura all'anno (dal calendario)", min_value=1,
+                                                      max_value=366, value=max(int(_open_days), 1),
+                                                      key=f"giorni_apertura_{p_id}_{anno}")
                     los_medio = st.number_input("Soggiorno Medio stimato (LOS)", min_value=1.0, value=3.0, step=0.5)
                     
                 with col_calc2:
@@ -1594,13 +1604,13 @@ Rispondi con esattamente questo formato (max 200 parole):
                 m3.metric("Costi Operativi", f"€{abs(variabili + fissi):,.0f}")
                 
                 margin_pct = (netto / fatturato * 100) if fatturato > 0 else 0
-                m4.metric("Netto PM", f"€{netto:,.0f}", f"{margin_pct:.1f}% Margine")
+                m4.metric("Margine Struttura", f"€{netto:,.0f}", f"{margin_pct:.1f}% Margine")
 
                 # 5. Gráfico Waterfall
                 fig = go.Figure(go.Waterfall(
                     orientation = "v",
                     measure = ["relative", "relative", "relative", "relative", "total"],
-                    x = ["Fatturato Lordo", "Comm. OTA", "Costi Variabili", "Costi Fissi", "Netto PM"],
+                    x = ["Fatturato Lordo", "Comm. OTA", "Costi Variabili", "Costi Fissi", "Margine Struttura"],
                     text = [f"€{fatturato:,.0f}", f"-€{abs(ota):,.0f}", f"-€{abs(variabili):,.0f}", f"-€{abs(fissi):,.0f}", f"€{netto:,.0f}"],
                     y = [fatturato, ota, variabili, fissi, netto],
                     textposition = "outside",
@@ -1619,6 +1629,24 @@ Rispondi con esattamente questo formato (max 200 parole):
                 fig.update_xaxes(showgrid=False)
                 fig.update_yaxes(showgrid=True, gridcolor=_GRID)
                 st.plotly_chart(fig, use_container_width=True)
+
+                # 6. Ripartizione PM / Proprietario
+                st.subheader("🤝 Ripartizione PM / Proprietario")
+                split = calculate_pm_owner_split(df_res, df_fix, df_var, anno, df_util)
+                if split['owner']['quota'] == 0 and split['pm']['quota'] > 0:
+                    st.warning("⚠️ La Quota Proprietario risulta 0: se usi KrossBooking ricarica l'Excel delle "
+                               "prenotazioni dalla tab Dati per importarla.")
+                st.caption("Quota dal PMS (Quota PM / Quota Proprietario) meno i costi a carico di ciascuno. "
+                           "Chi sostiene ogni costo si imposta in ⚙️ Dati → Configurazione Costi.")
+                sp1, sp2 = st.columns(2)
+                for col_sp, key_sp, label_sp in ((sp1, 'pm', '🏢 Property Manager'), (sp2, 'owner', '🏠 Proprietario')):
+                    d_sp = split[key_sp]
+                    with col_sp:
+                        st.markdown(f"**{label_sp}**")
+                        st.markdown(_html_table(pd.DataFrame({
+                            'Voce': ['Quota dal PMS', 'Costi variabili', 'Costi fissi e utenze', 'Netto'],
+                            '€': [d_sp['quota'], -d_sp['var'], -d_sp['fixed'], d_sp['netto']],
+                        }), fmt={'€': '€{:,.0f}'}, delta_cols=['€']), unsafe_allow_html=True)
             else:
                 st.info(f"Nessuna prenotazione trovata per {prop_name} nell'anno {anno}.")
 
@@ -1650,7 +1678,8 @@ Rispondi con esattamente questo formato (max 200 parole):
             week = (first_dow + day_num - 1) // 7
             arr_row = arr[arr['day'] == day_num]
             n = int(arr_row['n_arr'].iloc[0]) if not arr_row.empty else 0
-            occ = min(n / unita_cy * 100, 100) if unita_cy > 0 else 0
+            _open_d = int(open_units_by_day.iloc[day_num - 1])
+            occ = min(n / _open_d * 100, 100) if _open_d > 0 else 0
             z[dow][week] = occ
             text[dow][week] = f"<b>{day_num}</b><br>{occ:.0f}% occ"
 
@@ -1668,10 +1697,11 @@ Rispondi con esattamente questo formato (max 200 parole):
             week = (first_dow + day_num - 1) // 7
             arr_row = arr[arr['day'] == day_num]
             n = int(arr_row['n_arr'].iloc[0]) if not arr_row.empty else 0
-            occ = min(n / unita_cy * 100, 100) if unita_cy > 0 else 0
+            _open_d = int(open_units_by_day.iloc[day_num - 1])
+            occ = min(n / _open_d * 100, 100) if _open_d > 0 else 0
             fig_cal.add_annotation(
                 x=week, y=dow,
-                text=f"<b>{day_num}</b><br>{occ:.0f}%",
+                text=f"<b>{day_num}</b><br>{occ:.0f}%" if _open_d > 0 else f"<b>{day_num}</b><br>chiuso",
                 showarrow=False, font=dict(size=10, color='#1A202C'),
                 xref='x', yref='y'
             )
@@ -1684,7 +1714,8 @@ Rispondi con esattamente questo formato (max 200 parole):
 
         days_below_50 = sum(
             1 for d in range(1, giorni_nel_mese+1)
-            if (arr[arr['day']==d]['n_arr'].values[0] if not arr[arr['day']==d].empty else 0) / max(unita_cy,1) < 0.5
+            if open_units_by_day.iloc[d - 1] > 0 and
+               (arr[arr['day']==d]['n_arr'].values[0] if not arr[arr['day']==d].empty else 0) / open_units_by_day.iloc[d - 1] < 0.5
         )
         if days_below_50 > 0:
             st.warning(f"⚠️ **{days_below_50} giorni** con occupancy stimata sotto il 50%.")
@@ -1764,191 +1795,13 @@ Rispondi con esattamente questo formato (max 200 parole):
 
         st.divider()
 
-        # --- SEZIONE 3: CONFIGURAZIONE COSTI PERMANENTI ---
-        st.subheader("⚙️ Configurazione Costi")
-        st.caption("Configura una sola volta i costi per ogni unità — vengono applicati automaticamente a tutte le prenotazioni future. Se aggiorni una categoria già esistente, il vecchio valore viene storicizzato.")
+        # --- SEZIONE 3: CALENDARIO DI APERTURA ---
+        render_availability_section(supabase, TENANT_ID)
 
-        _FISSI_CAT = [
-            "IMU", "TARI", "Assicurazione", "Affitto",
-            "Internet / WiFi", "Pulizie comuni", "Manutenzione", "Altra spesa fissa",
-        ]
-        _UTIL_CAT  = ["Luce", "Gas", "Acqua", "Condominio", "Altra utenza"]
-        _VAR_CAT = {
-            "cleaning":  "🧹 Pulizia appartamento",
-            "laundry":   "👕 Lavanderia / Biancheria",
-            "amenities": "🎁 Kit benvenuto / Dotazioni",
-            "other":     "🔧 Altro costo operativo",
-        }
-        _VAR_LABELS = list(_VAR_CAT.values())
-        _VAR_KEYS   = list(_VAR_CAT.keys())
+        st.divider()
 
-        _props_c = db.load_properties(supabase, TENANT_ID)
-        props_c  = dict(zip(_props_c['name'], _props_c['id']))
-
-        if not props_c:
-            st.info("Carica un file di prenotazioni per registrare le tue proprietà prima di configurare i costi.")
-        else:
-            prop_c_nome = st.selectbox("🏠 Unità:", list(props_c.keys()), key="prop_cost_sel")
-            prop_c_id   = props_c[prop_c_nome]
-
-            # Carica costi attivi e cleaning fee per questa proprietà
-            df_fix_c, df_var_c, df_util_c = db.load_costs(supabase, TENANT_ID, property_id=prop_c_id)
-            df_util_c = df_util_c.head(8)
-            _settings_c = db.load_current_settings(supabase, TENANT_ID, prop_c_id)
-            current_cf = float(_settings_c.get('cleaning_fee') or 0) if _settings_c else 0.0
-
-            # ── Cleaning fee (ricavo da guest, non incluso nel PMS) ──
-            with st.expander(f"🧹 Quota Pulizie addebitata al Guest — attuale: €{current_cf:.2f}/soggiorno", expanded=(current_cf == 0)):
-                st.caption("Questa quota viene aggiunta al ricavo lordo nel calcolo del margine (non è un costo, è un ricavo non tracciato dal PMS).")
-                with st.form("form_cleaning_fee"):
-                    new_cf = st.number_input("Importo per soggiorno (€):", min_value=0.0, value=current_cf, step=5.0, format="%.2f")
-                    if st.form_submit_button("💾 Aggiorna", type="primary"):
-                        try:
-                            db.update_settings(supabase, TENANT_ID, prop_c_id, {"cleaning_fee": float(new_cf)})
-                            st.success(f"✅ Quota pulizie aggiornata a €{new_cf:.2f}/soggiorno.")
-                            st.cache_data.clear(); st.rerun()
-                        except Exception as e:
-                            st.error(f"Errore: {e}")
-
-            cl_left, cl_right = st.columns([3, 2])
-
-            # ── PANNELLO SINISTRA: riepilogo costi attivi ──
-            with cl_left:
-                st.markdown("##### 📋 Costi configurati per questa unità")
-
-                # ── Spese strutturali ──
-                st.caption("**🏛️ Spese Strutturali** — IMU, TARI, assicurazione, affitto…")
-                if not df_fix_c.empty:
-                    _freq_map = {'monthly': 'Mensile', 'yearly': 'Annuale'}
-                    for _, _r in df_fix_c.iterrows():
-                        _ca, _cb, _cc, _cd = st.columns([2.5, 1.3, 1.1, 0.5])
-                        _ca.markdown(f"**{_r['category']}**")
-                        _cb.caption(f"€ {float(_r['amount']):,.2f}")
-                        _cc.caption(_freq_map.get(_r['frequency'], _r['frequency']))
-                        if _cd.button("🗑️", key=f"del_fix_{_r['id']}", help="Elimina"):
-                            try:
-                                db.delete_cost(supabase, _r['id'])
-                                st.cache_data.clear(); st.rerun()
-                            except Exception as _e:
-                                st.error(f"Errore: {_e}")
-                else:
-                    st.info("Nessuna spesa strutturale configurata.")
-
-                st.divider()
-
-                # ── Bollette utenze ──
-                st.caption("**⚡ Bollette Utenze** — ultime 8 inserite (luce, gas, acqua…)")
-                if not df_util_c.empty:
-                    for _, _r in df_util_c.iterrows():
-                        _ca, _cb, _cc, _cd = st.columns([1.4, 1.2, 2.2, 0.5])
-                        _ca.markdown(f"**{_r['category']}**")
-                        _cb.caption(f"€ {float(_r['amount']):,.2f}")
-                        _pf = pd.to_datetime(_r['period_from']).strftime('%d/%m/%y')
-                        _pt = pd.to_datetime(_r['period_to']).strftime('%d/%m/%y')
-                        _cc.caption(f"{_pf} → {_pt}")
-                        if _cd.button("🗑️", key=f"del_util_{_r['id']}", help="Elimina"):
-                            try:
-                                db.delete_cost(supabase, _r['id'])
-                                st.cache_data.clear(); st.rerun()
-                            except Exception as _e:
-                                st.error(f"Errore: {_e}")
-                else:
-                    st.info("Nessuna bolletta inserita ancora.")
-
-                st.divider()
-
-                # ── Costi operativi per prenotazione ──
-                st.caption("**🔑 Costi per Prenotazione** — pulizie, lavanderia…")
-                if not df_var_c.empty:
-                    _basis_map = {'per_booking': '/prenotazione', 'per_night': '/notte', 'per_guest': '/ospite'}
-                    for _, _r in df_var_c.iterrows():
-                        _ca, _cb, _cc, _cd = st.columns([2.2, 1.2, 1.4, 0.5])
-                        _label = _VAR_CAT.get(_r['cost_type'], _r['cost_type'])
-                        _label = _label.split(' ', 1)[1] if ' ' in _label else _label
-                        _ca.markdown(f"**{_label}**")
-                        _cb.caption(f"€ {float(_r['value']):,.2f}")
-                        _cc.caption(_basis_map.get(_r['basis'], _r['basis']))
-                        if _cd.button("🗑️", key=f"del_var_{_r['id']}", help="Elimina"):
-                            try:
-                                db.delete_cost(supabase, _r['id'])
-                                st.cache_data.clear(); st.rerun()
-                            except Exception as _e:
-                                st.error(f"Errore: {_e}")
-                else:
-                    st.info("Nessun costo operativo configurato.")
-
-            # ── PANNELLO DESTRA: form aggiunta ──
-            with cl_right:
-                st.markdown("##### ➕ Aggiungi costo")
-                tipo_c = st.radio(
-                    "Tipo:",
-                    ["🏛️ Strutturale", "⚡ Bolletta Utenza", "🔑 Per Prenotazione"],
-                    horizontal=False, key="tipo_costo_radio",
-                )
-
-                if tipo_c == "🏛️ Strutturale":
-                    st.caption("IMU, TARI, assicurazione, affitto — importo fisso mensile o annuale.")
-                    with st.form("form_costi_fix"):
-                        motivo_c  = st.selectbox("Categoria:", _FISSI_CAT)
-                        importo_c = st.number_input("Importo (€)", min_value=0.0, step=10.0, format="%.2f")
-                        freq_lbl  = st.radio("Frequenza:", ["Mensile", "Annuale"], horizontal=True)
-                        data_c    = st.date_input("Valido dal:", datetime.date.today())
-                        if st.form_submit_button("💾 Salva", type="primary"):
-                            if importo_c <= 0:
-                                st.error("Importo deve essere > 0.")
-                            else:
-                                try:
-                                    db.save_recurring_cost(
-                                        supabase, TENANT_ID, prop_c_id, motivo_c,
-                                        "monthly" if freq_lbl == "Mensile" else "yearly", importo_c, data_c,
-                                    )
-                                    st.success(f"✅ {motivo_c} — €{importo_c:.2f}/{freq_lbl.lower()} salvato.")
-                                    st.cache_data.clear(); st.rerun()
-                                except Exception as e:
-                                    st.error(f"Errore: {e}")
-
-                elif tipo_c == "⚡ Bolletta Utenza":
-                    st.caption("Inserisci ogni bolletta con il suo periodo — il sistema prorata il costo sui giorni corretti.")
-                    with st.form("form_costi_util"):
-                        cat_u     = st.selectbox("Utenza:", _UTIL_CAT)
-                        importo_c = st.number_input("Importo bolletta (€)", min_value=0.0, step=1.0, format="%.2f")
-                        uc1, uc2  = st.columns(2)
-                        data_from = uc1.date_input("Dal:", datetime.date.today().replace(day=1))
-                        data_to   = uc2.date_input("Al:", datetime.date.today())
-                        note_c    = st.text_input("Note (opzionale)", placeholder="es. Bimestre gen-feb 2025")
-                        if st.form_submit_button("💾 Salva Bolletta", type="primary"):
-                            if importo_c <= 0:
-                                st.error("Importo deve essere > 0.")
-                            elif data_to < data_from:
-                                st.error("La data 'Al' deve essere successiva alla data 'Dal'.")
-                            else:
-                                try:
-                                    db.save_utility_bill(supabase, TENANT_ID, prop_c_id, cat_u, importo_c,
-                                                         data_from, data_to, note_c)
-                                    st.success(f"✅ Bolletta {cat_u} €{importo_c:.2f} salvata ({data_from.strftime('%d/%m')}–{data_to.strftime('%d/%m/%Y')}).")
-                                    st.cache_data.clear(); st.rerun()
-                                except Exception as e:
-                                    st.error(f"Errore: {e}")
-
-                else:  # Per Prenotazione
-                    st.caption("Pulizie, lavanderia, kit — costo che si applica ad ogni arrivo.")
-                    with st.form("form_costi_var"):
-                        var_lbl   = st.selectbox("Categoria:", _VAR_LABELS)
-                        motivo_c  = _VAR_KEYS[_VAR_LABELS.index(var_lbl)]
-                        importo_c = st.number_input("Importo (€)", min_value=0.0, step=5.0, format="%.2f")
-                        base_lbl  = st.radio("Si applica:", ["Per prenotazione", "Per notte", "Per ospite"], horizontal=True)
-                        base_c    = {"Per prenotazione": "per_booking", "Per notte": "per_night", "Per ospite": "per_guest"}[base_lbl]
-                        data_c    = st.date_input("Valido dal:", datetime.date.today())
-                        if st.form_submit_button("💾 Salva", type="primary"):
-                            if importo_c <= 0:
-                                st.error("Importo deve essere > 0.")
-                            else:
-                                try:
-                                    db.save_recurring_cost(supabase, TENANT_ID, prop_c_id, motivo_c, base_c, importo_c, data_c)
-                                    st.success(f"✅ {var_lbl.split(' ',1)[1]} — €{importo_c:.2f} {base_lbl.lower()} salvato.")
-                                    st.cache_data.clear(); st.rerun()
-                                except Exception as e:
-                                    st.error(f"Errore: {e}")
+        # --- SEZIONE 4: CONFIGURAZIONE COSTI ---
+        render_costs_section(supabase, TENANT_ID)
 
 else:
     # =====================================================

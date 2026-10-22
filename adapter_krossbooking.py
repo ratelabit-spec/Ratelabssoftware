@@ -46,6 +46,9 @@ def load_and_clean_krossbooking(file):
     """
     df = pd.read_excel(file)
 
+    # KrossBooking esporta "Quota Proprietario" (P maiuscola): uniformiamo il nome della colonna
+    df = df.rename(columns={'Quota Proprietario': 'Quota proprietario'})
+
     # 1. Parsing Date (a todo el dataset)
     for col in ['Check in', 'Data inserimento', 'Check-out', 'Data cancellazione']:
         if col in df.columns:

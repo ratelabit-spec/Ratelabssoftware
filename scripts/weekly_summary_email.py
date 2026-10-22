@@ -14,6 +14,7 @@ from supabase import create_client
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import db  # noqa: E402
+from capacity import capacity  # noqa: E402
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -33,9 +34,12 @@ def load_owner_emails(tenant_id):
     return [p["email"] for p in profiles if p.get("email")]
 
 
-def compute_summary(df, total_units, today):
-    """Stessa logica di calcola_kpi/Panoramica Anno in krossbooking_v1_1.py, ma standalone."""
-    if df.empty or total_units <= 0:
+def compute_summary(df, props, periods, today):
+    """
+    Stessa logica di calcola_kpi/Panoramica Anno in krossbooking_v1_1.py, ma standalone.
+    La capacità usa le unità di `props` e il calendario di apertura `periods`.
+    """
+    if df.empty or props.empty:
         return None
 
     mask_canc = df["is_cancelled"].fillna(False).astype(bool)
@@ -44,8 +48,7 @@ def compute_summary(df, total_units, today):
 
     year = today.year
     year_start = pd.Timestamp(year, 1, 1)
-    days_ytd = (today - year_start).days + 1
-    cap_ytd = total_units * days_ytd
+    cap_ytd = capacity(props, periods, year_start, today)
 
     df_ytd = df_attive[(df_attive["check_in_date"].dt.year == year) & (df_attive["booking_date"] <= today)]
     rev_ytd = float(df_ytd["gross_revenue"].sum())
@@ -76,11 +79,11 @@ def compute_summary(df, total_units, today):
         & (df_attive["booking_date"] <= today)
     ]
     notti_next7 = float(df_next7["nights"].sum())
-    cap_next7 = total_units * 7
+    cap_next7 = capacity(props, periods, today, week_end - pd.Timedelta(days=1))
     occ_next7 = notti_next7 / cap_next7 * 100 if cap_next7 > 0 else 0.0
 
     alerts = []
-    if occ_next7 < OCC_ALERT_THRESHOLD:
+    if cap_next7 > 0 and occ_next7 < OCC_ALERT_THRESHOLD:   # niente alert se la struttura è chiusa
         alerts.append(f"Occupancy prossimi 7 giorni al {occ_next7:.0f}% (sotto soglia {OCC_ALERT_THRESHOLD:.0f}%)")
     if canc_n >= 1:
         alerts.append(f"{canc_n} cancellazione/i nell'ultima settimana (€{canc_rev_risk:,.0f} a rischio)")
@@ -196,22 +199,21 @@ def main():
     for tenant in tenants:
         emails = load_owner_emails(tenant["id"])
         props = db.load_properties(supabase, tenant["id"])
-        total_units = int(props["units"].sum()) if not props.empty else 0
+        periods = db.load_availability(supabase, tenant["id"])
         df = db.load_reservations(supabase, tenant["id"])
-        if not emails or df.empty or total_units == 0:
+        if not emails or df.empty or props.empty:
             skipped += 1
             continue
 
-        portfolio = compute_summary(df, total_units, today)
+        portfolio = compute_summary(df, props, periods, today)
         if portfolio is None:
             skipped += 1
             continue
 
         per_property = {}
-        units_by_name = dict(zip(props["name"], props["units"].astype(int)))
         for unit in sorted(df["unit_id"].dropna().unique()):
             df_unit = df[df["unit_id"] == unit]
-            s = compute_summary(df_unit, units_by_name.get(unit, 1), today)
+            s = compute_summary(df_unit, props[props["name"] == unit], periods, today)
             if s:
                 per_property[unit] = s
 
