@@ -10,9 +10,10 @@ from adapter_krossbooking import load_and_clean_krossbooking
 from adapter_generic import apply_mapping, validate_mapping, FIELD_LABELS
 from etl_metrics import calculate_property_margins, calculate_pm_owner_split
 from etl_supabase import upsert_reservations
+from revenue_split import apply_revenue_split
 import db
 from capacity import capacity, capacity_by_month, daily_open_units
-from ui_settings import render_availability_section, render_costs_section
+from ui_settings import render_availability_section, render_costs_section, render_split_section
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Rate Labs", page_icon="📊", layout="wide")
@@ -254,7 +255,8 @@ def _fig_layout(**kw):
 @st.cache_data
 def load_data_from_supabase(tenant_id):
     try:
-        return db.load_reservations(supabase, tenant_id)
+        # quote PM / proprietario: dal PMS o dalle percentuali configurate per proprietà
+        return apply_revenue_split(db.load_reservations(supabase, tenant_id), db.load_all_settings(supabase, tenant_id))
     except Exception as e:
         st.error(f"❌ Impossibile connettersi a Supabase: {e}\n\nControlla che l'URL e la chiave in `.streamlit/secrets.toml` siano corretti e che il progetto Supabase esista.")
         st.stop()
@@ -1535,7 +1537,8 @@ Rispondi con esattamente questo formato (max 200 parole):
             st.info("Seleziona una proprietà per visualizzare l'analisi del margine.")
         if p_id is not None:
             with st.spinner("Calcolando i margini..."):
-                df_res = db.load_reservations(supabase, TENANT_ID, property_id=p_id)
+                df_res = apply_revenue_split(db.load_reservations(supabase, TENANT_ID, property_id=p_id),
+                                             db.load_all_settings(supabase, TENANT_ID))
                 df_fix, df_var, df_util = db.load_costs(supabase, TENANT_ID, property_id=p_id)
                 _settings = db.load_current_settings(supabase, TENANT_ID, p_id)
             cleaning_fee_prop = float(_settings.get('cleaning_fee') or 0) if _settings else 0.0
@@ -1636,8 +1639,14 @@ Rispondi con esattamente questo formato (max 200 parole):
                 if split['owner']['quota'] == 0 and split['pm']['quota'] > 0:
                     st.warning("⚠️ La Quota Proprietario risulta 0: se usi KrossBooking ricarica l'Excel delle "
                                "prenotazioni dalla tab Dati per importarla.")
-                st.caption("Quota dal PMS (Quota PM / Quota Proprietario) meno i costi a carico di ciascuno. "
-                           "Chi sostiene ogni costo si imposta in ⚙️ Dati → Configurazione Costi.")
+                _mode = (_settings or {}).get('split_mode', 'pms')
+                if _mode == 'percent':
+                    _basis = "netto OTA" if _settings.get('split_basis') == 'net_ota' else "lordo soggiorno"
+                    st.caption(f"Quote calcolate con le percentuali: PM {float(_settings['pm_pct']):g}% · "
+                               f"Proprietario {float(_settings['owner_pct']):g}% sul {_basis}, meno i costi a carico di ciascuno.")
+                else:
+                    st.caption("Quote importate dal PMS (Quota PM / Quota Proprietario) meno i costi a carico di ciascuno.")
+                st.caption("Percentuali e chi sostiene ogni costo si impostano in ⚙️ Dati.")
                 sp1, sp2 = st.columns(2)
                 for col_sp, key_sp, label_sp in ((sp1, 'pm', '🏢 Property Manager'), (sp2, 'owner', '🏠 Proprietario')):
                     d_sp = split[key_sp]
@@ -1647,6 +1656,12 @@ Rispondi con esattamente questo formato (max 200 parole):
                             'Voce': ['Quota dal PMS', 'Costi variabili', 'Costi fissi e utenze', 'Netto'],
                             '€': [d_sp['quota'], -d_sp['var'], -d_sp['fixed'], d_sp['netto']],
                         }), fmt={'€': '€{:,.0f}'}, delta_cols=['€']), unsafe_allow_html=True)
+                _res_y = df_res[df_res['check_in_date'].dt.year == anno]
+                _unsplit = float(_res_y['unsplit_net'].sum()) if 'unsplit_net' in _res_y else 0.0
+                if abs(_unsplit) >= 1:
+                    st.info(f"ℹ️ **Non ripartito: €{_unsplit:,.0f}** — differenza tra netto disponibile "
+                            f"(soggiorno + pulizie − commissioni) e quote PM + Proprietario"
+                            f"{' (le percentuali sommano meno di 100%)' if _unsplit > 0 else ' (con base lordo, le commissioni OTA non sono coperte da nessuna quota)'}.")
             else:
                 st.info(f"Nessuna prenotazione trovata per {prop_name} nell'anno {anno}.")
 
@@ -1802,6 +1817,11 @@ Rispondi con esattamente questo formato (max 200 parole):
 
         # --- SEZIONE 4: CONFIGURAZIONE COSTI ---
         render_costs_section(supabase, TENANT_ID)
+
+        st.divider()
+
+        # --- SEZIONE 5: RIPARTIZIONE RICAVI PM / PROPRIETARIO ---
+        render_split_section(supabase, TENANT_ID)
 
 else:
     # =====================================================

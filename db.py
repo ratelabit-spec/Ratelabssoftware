@@ -213,24 +213,49 @@ def load_current_settings(client, tenant_id, property_id):
     return res.data[0] if res.data else None
 
 
-def update_settings(client, tenant_id, property_id, changes, valid_from=None):
-    """Applica `changes` creando una nuova versione (la vigente viene chiusa al giorno prima)."""
-    valid_from = valid_from or datetime.date.today()
-    current = load_current_settings(client, tenant_id, property_id)
+def load_all_settings(client, tenant_id):
+    """Tutte le versioni di property_settings del tenant (per applicare la ripartizione storica)."""
+    q = lambda: client.table('property_settings').select('*').eq('tenant_id', tenant_id).order('valid_from')
+    return pd.DataFrame(fetch_all(q))
 
-    if current and datetime.date.fromisoformat(current['valid_from']) >= valid_from:
-        client.table('property_settings').update(changes).eq('id', current['id']).execute()
+
+SETTINGS_FIELDS = ('min_stay', 'cancellation_policy', 'cleaning_fee', 'promos', 'notes',
+                   'split_mode', 'pm_pct', 'owner_pct', 'split_basis', 'cleaning_fee_to')
+
+
+def update_settings(client, tenant_id, property_id, changes, valid_from=None):
+    """
+    Applica `changes` da `valid_from` in avanti, mantenendo lo storico:
+      - versioni che iniziano da valid_from in poi → aggiornate con `changes`;
+      - versione a cavallo di valid_from → chiusa al giorno prima e ricopiata da valid_from con `changes`;
+      - versioni finite prima di valid_from → invariate.
+    """
+    valid_from = valid_from or datetime.date.today()
+    versions = client.table('property_settings').select('*').eq('tenant_id', tenant_id) \
+        .eq('property_id', property_id).order('valid_from').execute().data
+
+    if not versions:
+        client.table('property_settings').insert(
+            {"tenant_id": tenant_id, "property_id": property_id, "valid_from": valid_from.isoformat(), **changes}
+        ).execute()
         return
 
-    new_row = {"tenant_id": tenant_id, "property_id": property_id, "valid_from": valid_from.isoformat()}
-    if current:
-        for key in ('min_stay', 'cancellation_policy', 'cleaning_fee', 'promos', 'notes'):
-            new_row[key] = current.get(key)
-        client.table('property_settings').update(
-            {"valid_to": (valid_from - datetime.timedelta(days=1)).isoformat()}
-        ).eq('id', current['id']).execute()
-    new_row.update(changes)
-    client.table('property_settings').insert(new_row).execute()
+    for v in versions:
+        v_from = datetime.date.fromisoformat(v['valid_from'])
+        v_to = datetime.date.fromisoformat(v['valid_to']) if v['valid_to'] else None
+        if v_to is not None and v_to < valid_from:
+            continue
+        if v_from >= valid_from:
+            client.table('property_settings').update(changes).eq('id', v['id']).execute()
+        else:
+            client.table('property_settings').update(
+                {"valid_to": (valid_from - datetime.timedelta(days=1)).isoformat()}
+            ).eq('id', v['id']).execute()
+            client.table('property_settings').insert({
+                "tenant_id": tenant_id, "property_id": property_id,
+                **{k: v.get(k) for k in SETTINGS_FIELDS},
+                "valid_from": valid_from.isoformat(), "valid_to": v['valid_to'], **changes,
+            }).execute()
 
 
 # ──────────────────────────────────────────

@@ -332,3 +332,67 @@ def render_costs_section(supabase, tenant_id):
                     for cost_id in source[source['property_id'].isin(del_target)]['id']:
                         db.delete_cost(supabase, cost_id)
                     _done(f"✅ Costo eliminato da {len(del_target)} unità.")
+
+
+# ──────────────────────────────────────────
+# RIPARTIZIONE RICAVI PM / PROPRIETARIO
+# ──────────────────────────────────────────
+_BASIS_LABELS = {"net_ota": "Netto OTA (soggiorno − commissioni)", "gross": "Lordo (addebito soggiorno)"}
+_CLEANING_TO_LABELS = {"pm": "Tutta al PM", "owner": "Tutta al proprietario", "split": "Ripartita con le stesse %"}
+
+
+def render_split_section(supabase, tenant_id):
+    st.subheader("🤝 Ripartizione Ricavi PM / Proprietario")
+    st.caption(
+        "Per ogni unità scegli se usare le quote importate dal PMS o le tue percentuali. "
+        "Le percentuali valgono dalla data indicata: le prenotazioni precedenti mantengono la ripartizione di prima."
+    )
+
+    props = db.load_properties(supabase, tenant_id)
+    if props.empty:
+        st.info("Carica un file di prenotazioni per registrare le tue proprietà.")
+        return
+    names = dict(zip(props['id'], props['name']))
+    settings = db.load_all_settings(supabase, tenant_id)
+    current = settings[settings['valid_to'].isna()].set_index('property_id') if not settings.empty else pd.DataFrame()
+
+    def _describe(pid):
+        if current.empty or pid not in current.index or current.loc[pid].get('split_mode') != 'percent':
+            return "Quote dal PMS", "—", "—", "—"
+        c = current.loc[pid]
+        return ("Percentuali", f"PM {float(c['pm_pct']):g}% · Prop. {float(c['owner_pct']):g}%",
+                _BASIS_LABELS[c['split_basis']].split(' (')[0], _CLEANING_TO_LABELS[c['cleaning_fee_to']])
+
+    rows = [(names[pid], *_describe(pid)) for pid in props['id']]
+    with st.expander("📋 Ripartizione attuale per unità", expanded=False):
+        st.dataframe(pd.DataFrame(rows, columns=['Unità', 'Modalità', 'Percentuali', 'Base', 'Quota pulizie']),
+                     hide_index=True, use_container_width=True)
+
+    target = _units_picker(props, "Applica a:", "split", [props['id'].iloc[0]])
+    mode = st.radio("Modalità:", ["Percentuali personalizzate", "Quote dal PMS"], horizontal=True, key="split_mode")
+    with st.form("form_split"):
+        if mode == "Percentuali personalizzate":
+            c1, c2 = st.columns(2)
+            pm_pct    = c1.number_input("% PM", min_value=0.0, max_value=100.0, value=25.0, step=1.0)
+            owner_pct = c2.number_input("% Proprietario", min_value=0.0, max_value=100.0, value=72.0, step=1.0)
+            basis = st.radio("Calcolata su:", list(_BASIS_LABELS.keys()), format_func=_BASIS_LABELS.get, horizontal=True)
+            cleaning_to = st.radio("Quota pulizie addebitata al guest:", list(_CLEANING_TO_LABELS.keys()),
+                                   format_func=_CLEANING_TO_LABELS.get, horizontal=True)
+            st.caption("Se le percentuali sommano meno di 100%, la differenza appare come «non ripartito» "
+                       "(es. IVA o cedolare). Con base lordo le commissioni OTA non sono coperte da nessuna quota.")
+        d_from = st.date_input("Valida dal:", datetime.date(datetime.date.today().year, 1, 1),
+                               help="Le prenotazioni con check-in da questa data usano la nuova ripartizione.")
+        if st.form_submit_button("💾 Salva ripartizione", type="primary"):
+            if not target:
+                st.error("Seleziona almeno un'unità.")
+            elif mode == "Percentuali personalizzate" and pm_pct + owner_pct > 100:
+                st.error(f"PM + Proprietario = {pm_pct + owner_pct:g}%: non può superare 100%.")
+            else:
+                if mode == "Percentuali personalizzate":
+                    changes = {"split_mode": "percent", "pm_pct": pm_pct, "owner_pct": owner_pct,
+                               "split_basis": basis, "cleaning_fee_to": cleaning_to}
+                else:
+                    changes = {"split_mode": "pms"}
+                for pid in target:
+                    db.update_settings(supabase, tenant_id, pid, changes, valid_from=d_from)
+                _done(f"✅ Ripartizione salvata per {len(target)} unità.")
