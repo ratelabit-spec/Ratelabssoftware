@@ -337,7 +337,11 @@ def render_costs_section(supabase, tenant_id):
 # ──────────────────────────────────────────
 # RIPARTIZIONE RICAVI PM / PROPRIETARIO
 # ──────────────────────────────────────────
-_BASIS_LABELS = {"net_ota": "Netto OTA (soggiorno − commissioni)", "gross": "Lordo (addebito soggiorno)"}
+_BASIS_LABELS = {
+    "total":   "Fatturato totale (soggiorno + pulizie)",
+    "gross":   "Pernottamento (addebito soggiorno)",
+    "net_ota": "Pernottamento netto OTA (soggiorno − commissioni)",
+}
 _CLEANING_TO_LABELS = {"pm": "Tutta al PM", "owner": "Tutta al proprietario", "split": "Ripartita con le stesse %"}
 
 
@@ -360,8 +364,9 @@ def render_split_section(supabase, tenant_id):
         if current.empty or pid not in current.index or current.loc[pid].get('split_mode') != 'percent':
             return "Quote dal PMS", "—", "—", "—"
         c = current.loc[pid]
+        cleaning = "Inclusa nella base" if c['split_basis'] == 'total' else _CLEANING_TO_LABELS[c['cleaning_fee_to']]
         return ("Percentuali", f"PM {float(c['pm_pct']):g}% · Prop. {float(c['owner_pct']):g}%",
-                _BASIS_LABELS[c['split_basis']].split(' (')[0], _CLEANING_TO_LABELS[c['cleaning_fee_to']])
+                _BASIS_LABELS[c['split_basis']].split(' (')[0], cleaning)
 
     rows = [(names[pid], *_describe(pid)) for pid in props['id']]
     with st.expander("📋 Ripartizione attuale per unità", expanded=False):
@@ -370,16 +375,23 @@ def render_split_section(supabase, tenant_id):
 
     target = _units_picker(props, "Applica a:", "split", [props['id'].iloc[0]])
     mode = st.radio("Modalità:", ["Percentuali personalizzate", "Quote dal PMS"], horizontal=True, key="split_mode")
+    if mode == "Percentuali personalizzate":
+        basis = st.radio("Percentuali calcolate su:", list(_BASIS_LABELS.keys()), index=2,
+                         format_func=_BASIS_LABELS.get, key="split_basis")
     with st.form("form_split"):
         if mode == "Percentuali personalizzate":
             c1, c2 = st.columns(2)
             pm_pct    = c1.number_input("% PM", min_value=0.0, max_value=100.0, value=25.0, step=1.0)
             owner_pct = c2.number_input("% Proprietario", min_value=0.0, max_value=100.0, value=72.0, step=1.0)
-            basis = st.radio("Calcolata su:", list(_BASIS_LABELS.keys()), format_func=_BASIS_LABELS.get, horizontal=True)
-            cleaning_to = st.radio("Quota pulizie addebitata al guest:", list(_CLEANING_TO_LABELS.keys()),
-                                   format_func=_CLEANING_TO_LABELS.get, horizontal=True)
+            if basis == "total":
+                cleaning_to = "split"
+                st.caption("La quota pulizie è inclusa nella base e viene ripartita con le stesse percentuali.")
+            else:
+                cleaning_to = st.radio("Quota pulizie addebitata al guest:", list(_CLEANING_TO_LABELS.keys()),
+                                       format_func=_CLEANING_TO_LABELS.get, horizontal=True)
             st.caption("Se le percentuali sommano meno di 100%, la differenza appare come «non ripartito» "
-                       "(es. IVA o cedolare). Con base lordo le commissioni OTA non sono coperte da nessuna quota.")
+                       "(es. IVA o cedolare). Con le basi che non sottraggono le commissioni, la commissione OTA "
+                       "non è coperta da nessuna quota e il non ripartito risulta negativo.")
         d_from = st.date_input("Valida dal:", datetime.date(datetime.date.today().year, 1, 1),
                                help="Le prenotazioni con check-in da questa data usano la nuova ripartizione.")
         if st.form_submit_button("💾 Salva ripartizione", type="primary"):

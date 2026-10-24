@@ -292,3 +292,26 @@ def load_market_snapshots(client, tenant_id):
     df['stay_date'] = pd.to_datetime(df['stay_date'])
     df['price'] = pd.to_numeric(df['price'], errors='coerce')
     return df.sort_values('stay_date').reset_index(drop=True)
+
+
+# ──────────────────────────────────────────
+# FUNNEL OTA (inserimento settimanale dai report di Booking / Airbnb)
+# ──────────────────────────────────────────
+def save_funnel_metrics(client, tenant_id, property_id, channel, period_start, period_end, values):
+    """Salva (o sovrascrive) i dati del funnel di una proprietà per canale e periodo."""
+    client.table('funnel_metrics').upsert({
+        "tenant_id": tenant_id, "property_id": property_id, "channel": channel,
+        "period_start": period_start.isoformat(), "period_end": period_end.isoformat(),
+        "entry_method": "form", **values,
+    }, on_conflict='property_id,channel,period_start,period_end').execute()
+
+
+def load_funnel_metrics(client, tenant_id, property_id=None):
+    def q():
+        query = client.table('funnel_metrics').select('*').eq('tenant_id', tenant_id).order('period_end', desc=True)
+        return query.eq('property_id', property_id) if property_id else query
+    return pd.DataFrame(fetch_all(q))
+
+
+def delete_funnel_metrics(client, funnel_id):
+    client.table('funnel_metrics').delete().eq('id', funnel_id).execute()

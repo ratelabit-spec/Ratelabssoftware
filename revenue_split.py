@@ -5,8 +5,9 @@ Per ogni prenotazione si usa la versione di property_settings valida alla data d
 (se il check-in è precedente alla prima versione, vale la prima). Con split_mode 'pms' restano
 le quote importate dal PMS; con 'percent' vengono ricalcolate:
 
-    base   = addebito soggiorno − commissioni OTA   (split_basis 'net_ota')
-           = addebito soggiorno                      (split_basis 'gross')
+    base   = soggiorno + quota pulizie                (split_basis 'total': pulizie ripartite con le stesse %)
+           = soggiorno                                (split_basis 'gross')
+           = soggiorno − commissioni OTA              (split_basis 'net_ota')
     PM     = base × pm_pct    + quota pulizie se va al PM   (o × pm_pct se 'split')
     Prop.  = base × owner_pct + quota pulizie se va al prop. (o × owner_pct se 'split')
 """
@@ -59,9 +60,13 @@ def apply_revenue_split(df_res: pd.DataFrame, settings: pd.DataFrame) -> pd.Data
     pm_pct    = pd.to_numeric(c['pm_pct']).fillna(0) / 100
     owner_pct = pd.to_numeric(c['owner_pct']).fillna(0) / 100
     cleaning  = pd.to_numeric(c['cleaning_fee']).fillna(0)
-    base = r['gross_revenue'] - r['commission_amount'].where(c['split_basis'] == 'net_ota', 0)
+    basis = c['split_basis']
+    base = (r['gross_revenue']
+            - r['commission_amount'].where(basis == 'net_ota', 0)
+            + cleaning.where(basis == 'total', 0))
 
-    to = c['cleaning_fee_to']
+    # con base 'total' la quota pulizie è già nella base: niente quota pulizie aggiuntiva
+    to = c['cleaning_fee_to'].where(basis != 'total', 'none')
     pm    = base * pm_pct    + cleaning.where(to == 'pm', 0)    + (cleaning * pm_pct).where(to == 'split', 0)
     owner = base * owner_pct + cleaning.where(to == 'owner', 0) + (cleaning * owner_pct).where(to == 'split', 0)
 

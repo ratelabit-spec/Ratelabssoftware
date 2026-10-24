@@ -14,6 +14,7 @@ from revenue_split import apply_revenue_split
 import db
 from capacity import capacity, capacity_by_month, daily_open_units
 from ui_settings import render_availability_section, render_costs_section, render_split_section
+from ui_funnel import render_funnel_tab
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Rate Labs", page_icon="📊", layout="wide")
@@ -877,8 +878,8 @@ if not df_cloud.empty:
     st.divider()
     st.caption(f"🔍 Analisi mensile — **{mes_nombre}** | OTB al **{fecha_hoy.strftime('%d/%m/%Y')}** | {lbl_portf}: **{unita_cy} {lbl_unita}**")
 
-    tab_revenue, tab_costi, tab_strategia, tab_dati = st.tabs([
-        "📊 Revenue", "💰 Costi & Margini", "💡 Strategia", "⚙️ Dati"
+    tab_revenue, tab_costi, tab_strategia, tab_visibilita, tab_dati = st.tabs([
+        "📊 Revenue", "💰 Costi & Margini", "💡 Strategia", "🔎 Visibilità", "⚙️ Dati"
     ])
 
     with tab_revenue:
@@ -1641,7 +1642,8 @@ Rispondi con esattamente questo formato (max 200 parole):
                                "prenotazioni dalla tab Dati per importarla.")
                 _mode = (_settings or {}).get('split_mode', 'pms')
                 if _mode == 'percent':
-                    _basis = "netto OTA" if _settings.get('split_basis') == 'net_ota' else "lordo soggiorno"
+                    _basis = {"total": "fatturato totale (soggiorno + pulizie)", "gross": "pernottamento",
+                              "net_ota": "pernottamento netto OTA"}.get(_settings.get('split_basis'), "")
                     st.caption(f"Quote calcolate con le percentuali: PM {float(_settings['pm_pct']):g}% · "
                                f"Proprietario {float(_settings['owner_pct']):g}% sul {_basis}, meno i costi a carico di ciascuno.")
                 else:
@@ -1661,7 +1663,7 @@ Rispondi con esattamente questo formato (max 200 parole):
                 if abs(_unsplit) >= 1:
                     st.info(f"ℹ️ **Non ripartito: €{_unsplit:,.0f}** — differenza tra netto disponibile "
                             f"(soggiorno + pulizie − commissioni) e quote PM + Proprietario"
-                            f"{' (le percentuali sommano meno di 100%)' if _unsplit > 0 else ' (con base lordo, le commissioni OTA non sono coperte da nessuna quota)'}.")
+                            f"{' (le percentuali sommano meno di 100%)' if _unsplit > 0 else ' (la base scelta non sottrae le commissioni OTA, che non sono coperte da nessuna quota)'}.")
             else:
                 st.info(f"Nessuna prenotazione trovata per {prop_name} nell'anno {anno}.")
 
@@ -1753,6 +1755,9 @@ Rispondi con esattamente questo formato (max 200 parole):
                         st.markdown(risposta.text)
                     except Exception as e:
                         st.error(f"Errore IA: {e}")
+
+    with tab_visibilita:
+        render_funnel_tab(supabase, TENANT_ID)
 
     with tab_dati:
         st.header("⚙️ Gestione Dati")
